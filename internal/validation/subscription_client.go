@@ -75,46 +75,48 @@ func (c *SubscriptionClient) ValidateRestrictionDetailed(orgID, restrictionKey s
 		Limit(1).
 		Scan(&sub).Error
 
-	if err != nil || sub.ID == "" {
-		// Fallback 1: check if org has an explicit expired or cancelled subscription
-		var expiredCount int64
-		c.db.Table("organization_subscriptions_readonly").
-			Where("organization_id = ? AND LOWER(status) IN ?", orgID, []string{"expired", "cancelled"}).
-			Count(&expiredCount)
-		if expiredCount > 0 {
-			return false, "Subscription expired. Please renew your plan.", 0, 0, nil
-		}
-
-		// Fallback 2: New organization or replica sync pending — allow initial access
-		log.Printf("[SubscriptionClient] Info: No explicit subscription found for org %s — allowing %s under initial trial defaults", orgID, restrictionKey)
-		return true, "Initial trial subscription — allowed", -1, 0, nil
-	}
-
-	// Check expiry — guard against zero-time (not yet synced) by checking IsZero()
 	statusLower := strings.ToLower(sub.Status)
-	if (statusLower == "active" || statusLower == "trial" || statusLower == "paid") && !sub.ExpiryDate.IsZero() && time.Now().UTC().After(sub.ExpiryDate) {
-		return false, "Subscription expired. Please renew your plan to perform this action.", 0, 0, nil
-	}
-
-	// Active trial mode has no restrictions
-	if sub.Status == "trial" && sub.ExpiryDate.After(time.Now().UTC()) {
-		return true, "Active trial mode — unlimited access", -1, 0, nil
+	isExpired := false
+	if err != nil || sub.ID == "" {
+		isExpired = true
+	} else if (statusLower == "active" || statusLower == "trial" || statusLower == "paid") && !sub.ExpiryDate.IsZero() && time.Now().UTC().After(sub.ExpiryDate) {
+		isExpired = true
+	} else if statusLower == "expired" || statusLower == "cancelled" {
+		isExpired = true
 	}
 
 	// 2. Collect all subscribed plan_ids (from main sub and modular subscription items like crm, ims, efs)
 	var planIDs []string
-	if sub.PlanID != "" {
-		planIDs = append(planIDs, sub.PlanID)
-	}
+	if isExpired {
+		var defaultPlan struct {
+			ID string
+		}
+		if errDP := c.db.Table("plans_readonly").
+			Where("is_default = TRUE AND is_active = TRUE").
+			Select("id").Scan(&defaultPlan).Error; errDP == nil && defaultPlan.ID != "" {
+			planIDs = append(planIDs, defaultPlan.ID)
+		} else {
+			planIDs = append(planIDs, "10000000-0000-0000-0000-000000000001")
+		}
+	} else {
+		// Active trial mode has no restrictions
+		if sub.Status == "trial" && sub.ExpiryDate.After(time.Now().UTC()) {
+			return true, "Active trial mode — unlimited access", -1, 0, nil
+		}
 
-	var itemPlanIDs []string
-	c.db.Table("organization_subscription_items_readonly").
-		Where("subscription_id = ?", sub.ID).
-		Pluck("plan_id", &itemPlanIDs)
+		if sub.PlanID != "" {
+			planIDs = append(planIDs, sub.PlanID)
+		}
 
-	for _, pid := range itemPlanIDs {
-		if pid != "" {
-			planIDs = append(planIDs, pid)
+		var itemPlanIDs []string
+		c.db.Table("organization_subscription_items_readonly").
+			Where("subscription_id = ?", sub.ID).
+			Pluck("plan_id", &itemPlanIDs)
+
+		for _, pid := range itemPlanIDs {
+			if pid != "" {
+				planIDs = append(planIDs, pid)
+			}
 		}
 	}
 
@@ -217,6 +219,7 @@ type rawPlan struct {
 	IsPerUser   bool      `gorm:"column:is_per_user"`
 	IsActive    bool      `gorm:"column:is_active"`
 	SortOrder   int       `gorm:"column:sort_order"`
+	IsDefault   bool      `gorm:"column:is_default"`
 	CreatedAt   time.Time `gorm:"column:created_at"`
 	UpdatedAt   time.Time `gorm:"column:updated_at"`
 }

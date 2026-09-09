@@ -56,8 +56,8 @@ func (h *SubscriptionEventHandler) handlePlanUpsert(ctx context.Context, raw jso
 	}
 
 	err := h.db.WithContext(ctx).Exec(`
-		INSERT INTO plans_readonly (id, name, description, price, valid_days, badge, status, is_per_user, is_active, sort_order, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?)
+		INSERT INTO plans_readonly (id, name, description, price, valid_days, badge, status, is_per_user, is_active, sort_order, is_default, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?)
 		ON CONFLICT (id) DO UPDATE SET
 			name = EXCLUDED.name,
 			description = EXCLUDED.description,
@@ -68,10 +68,11 @@ func (h *SubscriptionEventHandler) handlePlanUpsert(ctx context.Context, raw jso
 			is_per_user = EXCLUDED.is_per_user,
 			is_active = EXCLUDED.is_active,
 			sort_order = EXCLUDED.sort_order,
+			is_default = EXCLUDED.is_default,
 			updated_at = EXCLUDED.updated_at
 	`, payload.PlanID, payload.Name, payload.Description, payload.Price,
 		payload.ValidDays, payload.Badge, payload.Status,
-		payload.IsPerUser, payload.IsActive, payload.SortOrder, payload.UpdatedAt,
+		payload.IsPerUser, payload.IsActive, payload.SortOrder, payload.IsDefault, payload.UpdatedAt,
 	).Error
 	if err != nil {
 		log.Printf("[BillingSubConsumer] Failed to upsert plans_readonly for plan %s: %v", payload.PlanID, err)

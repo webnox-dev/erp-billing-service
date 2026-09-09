@@ -186,6 +186,8 @@ func AutoMigrate(db *gorm.DB) error {
 		log.Printf("Warning: failed to drop obsolete notes columns from service_appointments_readonly: %v", err)
 	}
 
+	db.Exec("ALTER TABLE plans_readonly ADD COLUMN IF NOT EXISTS is_default BOOLEAN NOT NULL DEFAULT FALSE")
+
 	// Seed default BillingItemCatalog
 	defaultCatalog := []domain.BillingItemCatalog{
 		{

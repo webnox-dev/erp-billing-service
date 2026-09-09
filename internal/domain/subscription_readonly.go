@@ -15,6 +15,7 @@ type PlanReadOnly struct {
 	IsPerUser   bool      `gorm:"not null;default:true" json:"is_per_user"`
 	IsActive    bool      `gorm:"not null;default:true" json:"is_active"`
 	SortOrder   int       `gorm:"not null;default:0" json:"sort_order"`
+	IsDefault   bool      `gorm:"not null;default:false" json:"is_default"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 }
