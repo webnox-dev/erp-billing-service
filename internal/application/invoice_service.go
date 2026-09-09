@@ -1486,8 +1486,26 @@ func (s *InvoiceService) sendInvoiceNotification(ctx context.Context, invoice *d
 	}
 
 	orgName := "Organization"
+	orgLogoURL := ""
 	if org != nil {
-		orgName = org.OrganizationName
+		if org.OrganizationName != "" {
+			orgName = org.OrganizationName
+		}
+		if org.IconURL != "" {
+			orgLogoURL = org.IconURL
+			if !strings.HasPrefix(orgLogoURL, "http://") && !strings.HasPrefix(orgLogoURL, "https://") {
+				mediaBaseURL := os.Getenv("MEDIA_BASE_URL")
+				if mediaBaseURL == "" {
+					mediaBaseURL = "https://webnox.blr1.digitaloceanspaces.com/"
+				}
+				if !strings.HasSuffix(mediaBaseURL, "/") && !strings.HasPrefix(orgLogoURL, "/") {
+					mediaBaseURL += "/"
+				} else if strings.HasSuffix(mediaBaseURL, "/") && strings.HasPrefix(orgLogoURL, "/") {
+					mediaBaseURL = strings.TrimSuffix(mediaBaseURL, "/")
+				}
+				orgLogoURL = mediaBaseURL + orgLogoURL
+			}
+		}
 	}
 
 	payload := shared_events.NotificationRequestedPayload{
@@ -1496,12 +1514,15 @@ func (s *InvoiceService) sendInvoiceNotification(ctx context.Context, invoice *d
 		Subject:        fmt.Sprintf("Invoice %s from %s", invNum, orgName),
 		TemplateName:   "invoice_sent",
 		TemplateData: map[string]interface{}{
-			"invoice_number": invNum,
-			"customer_name":  customerName,
-			"subject":        invoice.Subject,
-			"currency":       invoice.Currency,
-			"total_amount":   fmt.Sprintf("%.2f", invoice.TotalAmount),
-			"due_date":       invoice.DueDate.Format("2006-01-02"),
+			"invoice_number":    invNum,
+			"customer_name":     customerName,
+			"organization_name": orgName,
+			"company_logo":      orgLogoURL,
+			"logo_url":          orgLogoURL,
+			"subject":           invoice.Subject,
+			"currency":          invoice.Currency,
+			"total_amount":      fmt.Sprintf("%.2f", invoice.TotalAmount),
+			"due_date":          invoice.DueDate.Format("2006-01-02"),
 		},
 		CC:            ccEmails,
 		SourceService: "billing-service",
