@@ -53,10 +53,13 @@ func (r *InvoiceRepository) List(ctx context.Context, filter map[string]interfac
 
 func (r *InvoiceRepository) ListByModule(ctx context.Context, orgID uuid.UUID, sourceSystem domain.SourceSystem) ([]domain.Invoice, error) {
 	var invoices []domain.Invoice
-	err := r.db.WithContext(ctx).
+	query := r.db.WithContext(ctx).
 		Preload("Items").
-		Preload("Payments").
-		Where("organization_id = ? AND source_system = ?", orgID, sourceSystem).
+		Preload("Payments")
+	if orgID != uuid.Nil {
+		query = query.Where("organization_id = ?", orgID)
+	}
+	err := query.Where("source_system = ?", sourceSystem).
 		Order("created_at desc").
 		Find(&invoices).Error
 	if err == nil {

@@ -166,19 +166,41 @@ func (r *ReadModelRepository) GetOrganization(ctx context.Context, id uuid.UUID)
 	if err != nil {
 		return nil, err
 	}
-	// Populate IconURL and Email from the admin/owner user
+	// 1. Try to find admin/owner user with a non-empty profile photo
 	var adminUser domain.UserReadOnly
 	err = r.db.WithContext(ctx).
-		Where("organization_id = ? AND LOWER(role) IN ?", id.String(), []string{"admin", "owner"}).
+		Where("organization_id = ? AND (LOWER(role) LIKE ? OR LOWER(role) LIKE ? OR user_type = ?) AND profile_photo_url IS NOT NULL AND profile_photo_url != ''", id.String(), "%admin%", "%owner%", "admin").
 		Order("created_at ASC").
 		First(&adminUser).Error
-	if err != nil {
-		// Try any user of the organization
-		r.db.WithContext(ctx).
+
+	if err != nil || adminUser.ProfilePhotoURL == "" {
+		// 2. Try to find ANY user of the organization with a non-empty profile photo
+		var userWithPhoto domain.UserReadOnly
+		if errPhoto := r.db.WithContext(ctx).
+			Where("organization_id = ? AND profile_photo_url IS NOT NULL AND profile_photo_url != ''", id.String()).
+			Order("created_at ASC").
+			First(&userWithPhoto).Error; errPhoto == nil && userWithPhoto.ProfilePhotoURL != "" {
+			adminUser.ProfilePhotoURL = userWithPhoto.ProfilePhotoURL
+			if adminUser.Email == "" {
+				adminUser.Email = userWithPhoto.Email
+			}
+		}
+	}
+
+	// 3. Fallback for email / basic user info if still missing
+	if adminUser.Email == "" {
+		var anyUser domain.UserReadOnly
+		if errAny := r.db.WithContext(ctx).
 			Where("organization_id = ?", id.String()).
 			Order("created_at ASC").
-			First(&adminUser)
+			First(&anyUser).Error; errAny == nil {
+			adminUser.Email = anyUser.Email
+			if adminUser.ProfilePhotoURL == "" {
+				adminUser.ProfilePhotoURL = anyUser.ProfilePhotoURL
+			}
+		}
 	}
+
 	if adminUser.ProfilePhotoURL != "" {
 		rm.IconURL = adminUser.ProfilePhotoURL
 	}

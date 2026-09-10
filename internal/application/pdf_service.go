@@ -7,7 +7,7 @@ import (
 	"image"
 	_ "image/gif"
 	_ "image/jpeg"
-	_ "image/png"
+	png "image/png"
 	"io"
 	"net/http"
 	"os"
@@ -1305,9 +1305,20 @@ func containsIgnoreCase(s, substr string) bool {
 }
 
 // downloadLogoToTemp fetches an image URL (resolving relative paths if needed)
-// and writes it to a temporary file, returning the file path so gofpdf can embed it.
+// and writes it to a temporary PNG file so gofpdf can embed it reliably.
 // The caller is responsible for removing the temp file when done.
 func downloadLogoToTemp(logoURL string) (string, error) {
+	if logoURL == "" {
+		return "", fmt.Errorf("empty logo URL")
+	}
+
+	// 1. Check if it's already a local file path on disk
+	if strings.HasPrefix(logoURL, "/") || strings.HasPrefix(logoURL, "./") {
+		if _, err := os.Stat(logoURL); err == nil {
+			return logoURL, nil
+		}
+	}
+
 	fullURL := logoURL
 	if !strings.HasPrefix(logoURL, "http://") && !strings.HasPrefix(logoURL, "https://") {
 		mediaBaseURL := os.Getenv("MEDIA_BASE_URL")
@@ -1333,25 +1344,36 @@ func downloadLogoToTemp(logoURL string) (string, error) {
 		return "", fmt.Errorf("non-200 response from %s: %d", fullURL, resp.StatusCode)
 	}
 
-	// Detect extension from Content-Type
-	ext := ".jpg"
-	ct := resp.Header.Get("Content-Type")
-	switch {
-	case strings.Contains(ct, "png"):
-		ext = ".png"
-	case strings.Contains(ct, "gif"):
-		ext = ".gif"
-	case strings.Contains(ct, "webp"):
-		ext = ".webp"
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("read body: %w", err)
 	}
 
+	// Decode any standard image format (png, jpeg, gif) and encode as PNG for gofpdf compatibility
+	img, _, err := image.Decode(bytes.NewReader(data))
+	if err == nil {
+		tmp, err := os.CreateTemp("", "org-logo-*.png")
+		if err != nil {
+			return "", fmt.Errorf("create temp: %w", err)
+		}
+		defer tmp.Close()
+		if err := png.Encode(tmp, img); err == nil {
+			return tmp.Name(), nil
+		}
+	}
+
+	// Fallback to raw copy if image decode failed
+	ext := ".png"
+	ct := resp.Header.Get("Content-Type")
+	if strings.Contains(ct, "jpeg") || strings.Contains(ct, "jpg") {
+		ext = ".jpg"
+	}
 	tmp, err := os.CreateTemp("", "org-logo-*"+ext)
 	if err != nil {
 		return "", fmt.Errorf("create temp: %w", err)
 	}
 	defer tmp.Close()
-
-	if _, err = io.Copy(tmp, resp.Body); err != nil {
+	if _, err := tmp.Write(data); err != nil {
 		os.Remove(tmp.Name())
 		return "", fmt.Errorf("write temp: %w", err)
 	}
