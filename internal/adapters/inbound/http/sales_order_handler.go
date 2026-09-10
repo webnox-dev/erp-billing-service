@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"erp-billing-service/internal/application"
 	"erp-billing-service/internal/application/dto"
@@ -124,7 +125,7 @@ func (h *SalesOrderHandler) ListSalesOrders(w http.ResponseWriter, r *http.Reque
 	// Parse query parameters
 	filters := &dto.SalesOrderFilters{
 		Page:     1,
-		PageSize: 20,
+		PageSize: 500,
 	}
 
 	if page := r.URL.Query().Get("page"); page != "" {
@@ -149,8 +150,42 @@ func (h *SalesOrderHandler) ListSalesOrders(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
+	if customerName := r.URL.Query().Get("customer_name"); customerName != "" {
+		filters.CustomerName = &customerName
+	}
+
 	if search := r.URL.Query().Get("search"); search != "" {
 		filters.Search = &search
+	}
+
+	if startDate := r.URL.Query().Get("start_date"); startDate != "" {
+		if t, err := time.Parse("2006-01-02", startDate); err == nil {
+			filters.FromDate = &t
+		} else if t, err := time.Parse(time.RFC3339, startDate); err == nil {
+			filters.FromDate = &t
+		}
+	} else if fromDate := r.URL.Query().Get("from_date"); fromDate != "" {
+		if t, err := time.Parse("2006-01-02", fromDate); err == nil {
+			filters.FromDate = &t
+		} else if t, err := time.Parse(time.RFC3339, fromDate); err == nil {
+			filters.FromDate = &t
+		}
+	}
+
+	if endDate := r.URL.Query().Get("end_date"); endDate != "" {
+		if t, err := time.Parse("2006-01-02", endDate); err == nil {
+			endOfDay := time.Date(t.Year(), t.Month(), t.Day(), 23, 59, 59, 999999999, time.UTC)
+			filters.ToDate = &endOfDay
+		} else if t, err := time.Parse(time.RFC3339, endDate); err == nil {
+			filters.ToDate = &t
+		}
+	} else if toDate := r.URL.Query().Get("to_date"); toDate != "" {
+		if t, err := time.Parse("2006-01-02", toDate); err == nil {
+			endOfDay := time.Date(t.Year(), t.Month(), t.Day(), 23, 59, 59, 999999999, time.UTC)
+			filters.ToDate = &endOfDay
+		} else if t, err := time.Parse(time.RFC3339, toDate); err == nil {
+			filters.ToDate = &t
+		}
 	}
 
 	orders, total, err := h.service.ListSalesOrders(orgID, filters)

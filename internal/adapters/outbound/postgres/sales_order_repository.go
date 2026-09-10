@@ -62,23 +62,31 @@ func (r *SalesOrderRepository) List(orgID uuid.UUID, filters *dto.SalesOrderFilt
 	var orders []*domain.SalesOrder
 	var total int64
 
-	query := r.db.Where("organization_id = ?", orgID)
+	query := r.db.Where("sales_orders.organization_id = ?", orgID)
 
 	// Apply filters
-	if filters.Status != nil {
-		query = query.Where("status = ?", *filters.Status)
+	if filters.Status != nil && *filters.Status != "" {
+		query = query.Where("LOWER(sales_orders.status) = LOWER(?)", *filters.Status)
 	}
 	if filters.CustomerID != nil {
-		query = query.Where("customer_id = ?", *filters.CustomerID)
+		query = query.Where("sales_orders.customer_id = ?", *filters.CustomerID)
+	}
+	if filters.CustomerName != nil && *filters.CustomerName != "" {
+		custPattern := "%" + *filters.CustomerName + "%"
+		query = query.Where("sales_orders.customer_id IN (SELECT id FROM customers_readonly WHERE display_name ILIKE ? OR company_name ILIKE ?)", custPattern, custPattern)
 	}
 	if filters.FromDate != nil {
-		query = query.Where("order_date >= ?", *filters.FromDate)
+		query = query.Where("sales_orders.created_at >= ?", *filters.FromDate)
 	}
 	if filters.ToDate != nil {
-		query = query.Where("order_date <= ?", *filters.ToDate)
+		query = query.Where("sales_orders.created_at <= ?", *filters.ToDate)
 	}
-	if filters.Search != nil {
-		query = query.Where("order_number LIKE ?", "%"+*filters.Search+"%")
+	if filters.Search != nil && *filters.Search != "" {
+		searchPattern := "%" + *filters.Search + "%"
+		query = query.Where(
+			"sales_orders.order_number ILIKE ? OR sales_orders.subject ILIKE ? OR sales_orders.customer_id IN (SELECT id FROM customers_readonly WHERE display_name ILIKE ? OR company_name ILIKE ?)",
+			searchPattern, searchPattern, searchPattern, searchPattern,
+		)
 	}
 
 	// Count total
@@ -87,11 +95,13 @@ func (r *SalesOrderRepository) List(orgID uuid.UUID, filters *dto.SalesOrderFilt
 	}
 
 	// Apply pagination
-	offset := (filters.Page - 1) * filters.PageSize
-	query = query.Offset(offset).Limit(filters.PageSize)
+	if filters.PageSize > 0 {
+		offset := (filters.Page - 1) * filters.PageSize
+		query = query.Offset(offset).Limit(filters.PageSize)
+	}
 
 	// Fetch orders
-	err := query.Preload("Items").Order("created_at desc").Find(&orders).Error
+	err := query.Preload("Items").Order("sales_orders.created_at desc").Find(&orders).Error
 	return orders, total, err
 }
 
