@@ -118,7 +118,7 @@ func main() {
 	// 6. Initialize Services
 	invoiceService := application.NewInvoiceService(invoiceRepo, rmRepo, auditRepo, eventPublisher, pdfService, s3Service, inventoryClient, customerClient, salesOrderRepo)
 	paymentService := application.NewPaymentService(paymentRepo, invoiceRepo, salesOrderRepo, rmRepo, auditRepo, eventPublisher, customerClient)
-	salesOrderService := application.NewSalesOrderService(salesOrderRepo, invoiceRepo, rmRepo, eventPublisher, inventoryClient, customerClient)
+	salesOrderService := application.NewSalesOrderService(salesOrderRepo, invoiceRepo, rmRepo, eventPublisher, inventoryClient, customerClient, pdfService)
 	salesReturnService := application.NewSalesReturnService(salesReturnRepo, salesOrderRepo, invoiceRepo, paymentRepo, rmRepo, eventPublisher, inventoryClient)
 	subscriptionService := application.NewSubscriptionService(subscriptionRepo, invoiceRepo, paymentRepo, rmRepo, eventPublisher, razorpayClient)
 
@@ -231,6 +231,7 @@ func main() {
 	api.HandleFunc("/billing/sales-orders/{id}/deliver", salesOrderHandler.MarkAsDelivered).Methods("POST")
 	api.HandleFunc("/billing/sales-orders/{id}", salesOrderHandler.DeleteSalesOrder).Methods("DELETE")
 	api.HandleFunc("/billing/sales-orders/{id}/cancel", salesOrderHandler.CancelSalesOrder).Methods("POST", "DELETE")
+	api.HandleFunc("/billing/sales-orders/{id}/send", salesOrderHandler.SendSalesOrder).Methods("POST")
 
 	// Sales Return Routes
 	api.HandleFunc("/billing/sales-returns", salesReturnHandler.CreateSalesReturn).Methods("POST")

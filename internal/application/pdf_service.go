@@ -1,6 +1,7 @@
 package application
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"image"
@@ -1357,3 +1358,290 @@ func downloadLogoToTemp(logoURL string) (string, error) {
 
 	return tmp.Name(), nil
 }
+
+// GenerateSalesOrderPDF generates an official, beautifully styled PDF for a Sales Order
+func (s *PDFService) GenerateSalesOrderPDF(
+	ctx context.Context,
+	salesOrder *domain.SalesOrder,
+	customer *domain.CustomerRM,
+	organization *domain.OrganizationRM,
+) (string, []byte, error) {
+	orgDir := filepath.Join(s.storageBasePath, salesOrder.OrganizationID.String())
+	if err := os.MkdirAll(orgDir, 0755); err != nil {
+		fmt.Printf("[WARNING] Failed to create PDF directory %s: %v. Falling back to temp dir.\n", orgDir, err)
+		orgDir = filepath.Join(os.TempDir(), "billing-pdfs", salesOrder.OrganizationID.String())
+		if errFallback := os.MkdirAll(orgDir, 0755); errFallback != nil {
+			return "", nil, fmt.Errorf("failed to create PDF directory: %w", errFallback)
+		}
+	}
+
+	orderNum := salesOrder.ID.String()[:8]
+	if salesOrder.OrderNumber != nil && *salesOrder.OrderNumber != "" {
+		orderNum = *salesOrder.OrderNumber
+	}
+
+	filename := fmt.Sprintf("sales-order-%s.pdf", salesOrder.ID.String())
+	pdfPath := filepath.Join(orgDir, filename)
+
+	primaryR, primaryG, primaryB := 6, 95, 70 // Emerald Corporate Green for Sales Orders
+	textDarkR, textDarkG, textDarkB := 15, 23, 42
+	textMutedR, textMutedG, textMutedB := 100, 116, 139
+	lineR, lineG, lineB := 226, 232, 240
+	bgLightR, bgLightG, bgLightB := 248, 250, 252
+
+	currencySymbol := "$ "
+	if organization != nil && organization.Currency != "" {
+		currencySymbol = getCurrencySymbol(organization.Currency)
+	}
+
+	pdf := gofpdf.New("P", "mm", "A4", "")
+	pdf.AliasNbPages("{nb}")
+
+	pdf.SetFooterFunc(func() {
+		pdf.SetY(-15)
+		pdf.SetFont("Arial", "I", 8)
+		pdf.SetTextColor(textMutedR, textMutedG, textMutedB)
+		pdf.CellFormat(0, 10, fmt.Sprintf("Sales Order %s | Page %d of {nb}", orderNum, pdf.PageNo()), "", 0, "C", false, 0, "")
+	})
+
+	pdf.AddPage()
+	pdf.SetMargins(15, 15, 15)
+
+	// Watermark for draft
+	if salesOrder.Status == domain.SalesOrderStatusDraft {
+		pdf.SetFont("Arial", "B", 50)
+		pdf.SetTextColor(240, 240, 240)
+		pdf.Text(45, 145, "DRAFT COPY")
+		pdf.SetTextColor(0, 0, 0)
+	}
+
+	// Header: Organization & Title
+	logoTempPath := ""
+	if organization != nil && organization.IconURL != "" {
+		if p, err := downloadLogoToTemp(organization.IconURL); err == nil {
+			logoTempPath = p
+			defer os.Remove(p)
+		}
+	}
+
+	orgName := "Enterprise ERP"
+	if organization != nil && organization.OrganizationName != "" {
+		orgName = organization.OrganizationName
+	}
+
+	startY := pdf.GetY()
+	if logoTempPath != "" {
+		pdf.ImageOptions(logoTempPath, 15, startY, 35, 0, false, gofpdf.ImageOptions{ImageType: "", ReadDpi: true}, 0, "")
+		pdf.SetXY(55, startY)
+	} else {
+		pdf.SetXY(15, startY)
+	}
+
+	pdf.SetFont("Arial", "B", 14)
+	pdf.SetTextColor(primaryR, primaryG, primaryB)
+	pdf.CellFormat(75, 6, orgName, "", 1, "L", false, 0, "")
+
+	pdf.SetFont("Arial", "", 8.5)
+	pdf.SetTextColor(textMutedR, textMutedG, textMutedB)
+	if organization != nil {
+		if organization.Address != "" {
+			if logoTempPath != "" {
+				pdf.SetX(55)
+			} else {
+				pdf.SetX(15)
+			}
+			pdf.CellFormat(75, 4, organization.Address, "", 1, "L", false, 0, "")
+		}
+		if organization.City != "" || organization.State != "" {
+			if logoTempPath != "" {
+				pdf.SetX(55)
+			} else {
+				pdf.SetX(15)
+			}
+			pdf.CellFormat(75, 4, fmt.Sprintf("%s, %s %s", organization.City, organization.State, organization.ZipCode), "", 1, "L", false, 0, "")
+		}
+		if organization.Phone != "" {
+			if logoTempPath != "" {
+				pdf.SetX(55)
+			} else {
+				pdf.SetX(15)
+			}
+			pdf.CellFormat(75, 4, "Tel: "+organization.Phone, "", 1, "L", false, 0, "")
+		}
+	}
+
+	// Document Title (Right)
+	pdf.SetXY(120, startY)
+	pdf.SetFont("Arial", "B", 20)
+	pdf.SetTextColor(primaryR, primaryG, primaryB)
+	pdf.CellFormat(75, 8, "SALES ORDER", "", 1, "R", false, 0, "")
+
+	pdf.SetXY(120, pdf.GetY())
+	pdf.SetFont("Arial", "B", 10)
+	pdf.SetTextColor(textDarkR, textDarkG, textDarkB)
+	pdf.CellFormat(75, 5, "# "+orderNum, "", 1, "R", false, 0, "")
+
+	pdf.SetXY(120, pdf.GetY())
+	pdf.SetFont("Arial", "", 8.5)
+	pdf.SetTextColor(textMutedR, textMutedG, textMutedB)
+	pdf.CellFormat(75, 4, "Order Date: "+salesOrder.OrderDate.Format("Jan 02, 2006"), "", 1, "R", false, 0, "")
+	if salesOrder.DueDate != nil {
+		pdf.SetXY(120, pdf.GetY())
+		pdf.CellFormat(75, 4, "Due Date: "+salesOrder.DueDate.Format("Jan 02, 2006"), "", 1, "R", false, 0, "")
+	}
+	pdf.SetXY(120, pdf.GetY())
+	pdf.CellFormat(75, 4, "Status: "+strings.ToUpper(string(salesOrder.Status)), "", 1, "R", false, 0, "")
+
+	pdf.SetY(startY + 35)
+
+	// Divider
+	pdf.SetDrawColor(lineR, lineG, lineB)
+	pdf.SetLineWidth(0.5)
+	pdf.Line(15, pdf.GetY(), 195, pdf.GetY())
+	pdf.Ln(4)
+
+	// Customer Info & Billing/Shipping
+	pdf.SetFont("Arial", "B", 9)
+	pdf.SetTextColor(textMutedR, textMutedG, textMutedB)
+	pdf.CellFormat(85, 5, "BILL TO:", "", 0, "L", false, 0, "")
+	pdf.CellFormat(10, 5, "", "", 0, "L", false, 0, "")
+	pdf.CellFormat(85, 5, "SHIP TO:", "", 1, "L", false, 0, "")
+
+	custName := "Valued Customer"
+	if customer != nil && customer.DisplayName != "" {
+		custName = customer.DisplayName
+	}
+
+	pdf.SetFont("Arial", "B", 10)
+	pdf.SetTextColor(textDarkR, textDarkG, textDarkB)
+	pdf.CellFormat(85, 5, custName, "", 0, "L", false, 0, "")
+	pdf.CellFormat(10, 5, "", "", 0, "L", false, 0, "")
+	pdf.CellFormat(85, 5, custName, "", 1, "L", false, 0, "")
+
+	pdf.SetFont("Arial", "", 8.5)
+	pdf.SetTextColor(textMutedR, textMutedG, textMutedB)
+	billAddr := "Same as on file"
+	shipAddr := "Same as billing"
+	if customer != nil {
+		if customer.BillingStreet != "" {
+			billAddr = formatAddress(customer.BillingStreet, customer.BillingCity, customer.BillingState, customer.BillingCode, customer.BillingCountry)
+		}
+		if customer.ShippingStreet != "" {
+			shipAddr = formatAddress(customer.ShippingStreet, customer.ShippingCity, customer.ShippingState, customer.ShippingCode, customer.ShippingCountry)
+		}
+	}
+	pdf.CellFormat(85, 4, billAddr, "", 0, "L", false, 0, "")
+	pdf.CellFormat(10, 4, "", "", 0, "L", false, 0, "")
+	pdf.CellFormat(85, 4, shipAddr, "", 1, "L", false, 0, "")
+
+	if customer != nil && customer.Email != "" {
+		pdf.CellFormat(85, 4, "Email: "+customer.Email, "", 1, "L", false, 0, "")
+	} else {
+		pdf.Ln(2)
+	}
+
+	pdf.Ln(6)
+
+	// Table Header
+	pdf.SetFillColor(bgLightR, bgLightG, bgLightB)
+	pdf.SetDrawColor(lineR, lineG, lineB)
+	pdf.SetFont("Arial", "B", 8.5)
+	pdf.SetTextColor(textDarkR, textDarkG, textDarkB)
+	pdf.CellFormat(10, 7, "#", "1", 0, "C", true, 0, "")
+	pdf.CellFormat(80, 7, "Item & Description", "1", 0, "L", true, 0, "")
+	pdf.CellFormat(20, 7, "Qty", "1", 0, "C", true, 0, "")
+	pdf.CellFormat(25, 7, "Rate", "1", 0, "R", true, 0, "")
+	pdf.CellFormat(20, 7, "Tax", "1", 0, "R", true, 0, "")
+	pdf.CellFormat(25, 7, "Amount", "1", 1, "R", true, 0, "")
+
+	pdf.SetFont("Arial", "", 8)
+	for i, it := range salesOrder.Items {
+		fill := (i%2 == 1)
+		if fill {
+			pdf.SetFillColor(252, 252, 253)
+		} else {
+			pdf.SetFillColor(255, 255, 255)
+		}
+		pdf.CellFormat(10, 6, fmt.Sprintf("%d", i+1), "1", 0, "C", fill, 0, "")
+		pdf.CellFormat(80, 6, it.Name, "1", 0, "L", fill, 0, "")
+		pdf.CellFormat(20, 6, fmt.Sprintf("%.2f", it.Quantity), "1", 0, "C", fill, 0, "")
+		pdf.CellFormat(25, 6, fmt.Sprintf("%.2f", it.UnitPrice), "1", 0, "R", fill, 0, "")
+		pdf.CellFormat(20, 6, fmt.Sprintf("%.2f", it.Tax), "1", 0, "R", fill, 0, "")
+		pdf.CellFormat(25, 6, fmt.Sprintf("%.2f", it.Total), "1", 1, "R", fill, 0, "")
+	}
+
+	pdf.Ln(4)
+
+	// Summary on Right
+	sumY := pdf.GetY()
+	pdf.SetX(110)
+	pdf.SetFont("Arial", "", 8.5)
+	pdf.SetTextColor(textDarkR, textDarkG, textDarkB)
+	pdf.CellFormat(45, 5, "Subtotal:", "", 0, "R", false, 0, "")
+	pdf.CellFormat(30, 5, fmt.Sprintf("%s%.2f", currencySymbol, salesOrder.SubTotal), "", 1, "R", false, 0, "")
+
+	if salesOrder.DiscountTotal > 0 {
+		pdf.SetX(110)
+		pdf.SetTextColor(22, 163, 74)
+		pdf.CellFormat(45, 5, "Discount:", "", 0, "R", false, 0, "")
+		pdf.CellFormat(30, 5, fmt.Sprintf("-%s%.2f", currencySymbol, salesOrder.DiscountTotal), "", 1, "R", false, 0, "")
+		pdf.SetTextColor(textDarkR, textDarkG, textDarkB)
+	}
+
+	if salesOrder.TaxTotal > 0 {
+		pdf.SetX(110)
+		pdf.CellFormat(45, 5, "Tax Total:", "", 0, "R", false, 0, "")
+		pdf.CellFormat(30, 5, fmt.Sprintf("%s%.2f", currencySymbol, salesOrder.TaxTotal), "", 1, "R", false, 0, "")
+	}
+
+	if salesOrder.Adjustment != 0 {
+		pdf.SetX(110)
+		pdf.CellFormat(45, 5, "Adjustment:", "", 0, "R", false, 0, "")
+		pdf.CellFormat(30, 5, fmt.Sprintf("%s%.2f", currencySymbol, salesOrder.Adjustment), "", 1, "R", false, 0, "")
+	}
+
+	pdf.SetX(110)
+	pdf.SetDrawColor(lineR, lineG, lineB)
+	pdf.Line(120, pdf.GetY(), 195, pdf.GetY())
+	pdf.SetFont("Arial", "B", 11)
+	pdf.SetTextColor(primaryR, primaryG, primaryB)
+	pdf.CellFormat(45, 7, "Total Order Value:", "", 0, "R", false, 0, "")
+	pdf.CellFormat(30, 7, fmt.Sprintf("%s%.2f", currencySymbol, salesOrder.TotalAmount), "", 1, "R", false, 0, "")
+
+	// Terms and Notes on Left
+	if salesOrder.Terms != "" || salesOrder.Notes != "" {
+		pdf.SetXY(15, sumY)
+		pdf.SetFont("Arial", "B", 8.5)
+		pdf.SetTextColor(textDarkR, textDarkG, textDarkB)
+		if salesOrder.Notes != "" {
+			pdf.CellFormat(90, 4, "Notes:", "", 1, "L", false, 0, "")
+			pdf.SetFont("Arial", "", 8)
+			pdf.SetTextColor(textMutedR, textMutedG, textMutedB)
+			pdf.MultiCell(90, 3.5, salesOrder.Notes, "", "L", false)
+			pdf.Ln(2)
+		}
+		if salesOrder.Terms != "" {
+			pdf.SetFont("Arial", "B", 8.5)
+			pdf.SetTextColor(textDarkR, textDarkG, textDarkB)
+			pdf.CellFormat(90, 4, "Terms & Conditions:", "", 1, "L", false, 0, "")
+			pdf.SetFont("Arial", "", 8)
+			pdf.SetTextColor(textMutedR, textMutedG, textMutedB)
+			pdf.MultiCell(90, 3.5, salesOrder.Terms, "", "L", false)
+		}
+	}
+
+	// Output buffer
+	var buf bytes.Buffer
+	if err := pdf.Output(&buf); err != nil {
+		return "", nil, fmt.Errorf("pdf output: %w", err)
+	}
+
+	// Also write to file
+	pdfBytes := buf.Bytes()
+	if err := os.WriteFile(pdfPath, pdfBytes, 0644); err != nil {
+		fmt.Printf("[WARNING] Failed to write sales order PDF to file %s: %v\n", pdfPath, err)
+	}
+
+	return pdfPath, pdfBytes, nil
+}
+

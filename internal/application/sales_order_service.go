@@ -25,6 +25,7 @@ type SalesOrderService struct {
 	eventPublisher  domain.EventPublisher
 	inventoryClient outbound.InventoryClient
 	customerClient  outbound.CustomerClient
+	pdfService      *PDFService
 }
 
 // NewSalesOrderService creates a new sales order service
@@ -35,6 +36,7 @@ func NewSalesOrderService(
 	eventPublisher domain.EventPublisher,
 	inventoryClient outbound.InventoryClient,
 	customerClient outbound.CustomerClient,
+	pdfService *PDFService,
 ) *SalesOrderService {
 	return &SalesOrderService{
 		salesOrderRepo:  salesOrderRepo,
@@ -43,6 +45,7 @@ func NewSalesOrderService(
 		eventPublisher:  eventPublisher,
 		inventoryClient: inventoryClient,
 		customerClient:  customerClient,
+		pdfService:      pdfService,
 	}
 }
 
@@ -365,6 +368,11 @@ func (s *SalesOrderService) ConfirmSalesOrder(id uuid.UUID) (*dto.SalesOrderResp
 		OrderNumber:  *salesOrder.OrderNumber,
 	}
 	s.eventPublisher.Publish(context.Background(), metadata, event)
+
+	// Send confirmation email with PDF attachment to customer
+	customer, _ := s.rmRepo.GetCustomer(context.Background(), salesOrder.CustomerID)
+	org, _ := s.rmRepo.GetOrganization(context.Background(), salesOrder.OrganizationID)
+	_ = s.sendSalesOrderNotification(context.Background(), salesOrder, customer, org)
 
 	return s.toSalesOrderResponse(context.Background(), salesOrder), nil
 }
@@ -967,4 +975,159 @@ func (s *SalesOrderService) toSalesOrderResponse(ctx context.Context, salesOrder
 		ShippingCode:    shippingCode,
 		ShippingCountry: shippingCountry,
 	}
+}
+
+// SendSalesOrder sends the sales order confirmation email with PDF attachment to customer
+func (s *SalesOrderService) SendSalesOrder(ctx context.Context, id uuid.UUID) (*dto.SalesOrderResponse, error) {
+	salesOrder, err := s.salesOrderRepo.FindByID(id)
+	if err != nil {
+		return nil, fmt.Errorf("failed to find sales order: %w", err)
+	}
+
+	customer, err := s.rmRepo.GetCustomer(ctx, salesOrder.CustomerID)
+	if err != nil || customer == nil {
+		if s.customerClient != nil {
+			customer, _ = s.customerClient.GetCustomer(ctx, salesOrder.CustomerID)
+		}
+	}
+
+	org, err := s.rmRepo.GetOrganization(ctx, salesOrder.OrganizationID)
+	if err != nil {
+		fmt.Printf("[WARNING] Organization %s not found: %v\n", salesOrder.OrganizationID, err)
+	}
+
+	if err := s.sendSalesOrderNotification(ctx, salesOrder, customer, org); err != nil {
+		return nil, fmt.Errorf("failed to send sales order email: %w", err)
+	}
+
+	return s.toSalesOrderResponse(ctx, salesOrder), nil
+}
+
+func (s *SalesOrderService) sendSalesOrderNotification(ctx context.Context, salesOrder *domain.SalesOrder, customer *domain.CustomerRM, org *domain.OrganizationRM) error {
+	var contactEmail string
+	if salesOrder.ContactID != nil {
+		if contact, err := s.rmRepo.GetContact(ctx, *salesOrder.ContactID); err == nil && contact != nil && contact.Email != "" {
+			contactEmail = contact.Email
+		} else if s.customerClient != nil {
+			if contact, err := s.customerClient.GetContact(ctx, *salesOrder.ContactID); err == nil && contact != nil && contact.Email != "" {
+				contactEmail = contact.Email
+			}
+		}
+	}
+
+	var customerEmail string
+	if customer != nil && customer.Email != "" {
+		customerEmail = customer.Email
+	}
+
+	var primaryContactEmail string
+	if customer != nil {
+		if contact, err := s.rmRepo.GetPrimaryContact(ctx, customer.ID); err == nil && contact != nil && contact.Email != "" {
+			primaryContactEmail = contact.Email
+		}
+	}
+
+	var recipientEmail string
+	var ccEmails []string
+
+	if contactEmail != "" {
+		recipientEmail = contactEmail
+		if customerEmail != "" && strings.ToLower(customerEmail) != strings.ToLower(contactEmail) {
+			ccEmails = append(ccEmails, customerEmail)
+		}
+	} else if customerEmail != "" {
+		recipientEmail = customerEmail
+	} else if primaryContactEmail != "" {
+		recipientEmail = primaryContactEmail
+	}
+
+	if recipientEmail == "" {
+		fmt.Printf("[WARNING] No email recipient found for sales order %s notification\n", salesOrder.ID)
+		return nil
+	}
+
+	orderNum := salesOrder.ID.String()[:8]
+	if salesOrder.OrderNumber != nil && *salesOrder.OrderNumber != "" {
+		orderNum = *salesOrder.OrderNumber
+	}
+
+	// Generate PDF attachment
+	var attachments []shared_events.Attachment
+	if s.pdfService != nil {
+		_, pdfBytes, err := s.pdfService.GenerateSalesOrderPDF(ctx, salesOrder, customer, org)
+		if err != nil {
+			fmt.Printf("[ERROR] Failed to generate sales order PDF for attachment: %v\n", err)
+		} else if len(pdfBytes) > 0 {
+			attachments = append(attachments, shared_events.Attachment{
+				Name:        fmt.Sprintf("SalesOrder-%s.pdf", orderNum),
+				Content:     pdfBytes,
+				ContentType: "application/pdf",
+			})
+		}
+	}
+
+	customerName := "Valued Customer"
+	if customer != nil && customer.DisplayName != "" {
+		customerName = customer.DisplayName
+	}
+
+	orgName := "Enterprise ERP"
+	currency := "USD"
+	if org != nil {
+		if org.OrganizationName != "" {
+			orgName = org.OrganizationName
+		}
+		if org.Currency != "" {
+			currency = org.Currency
+		}
+	}
+
+	dueDateStr := ""
+	if salesOrder.DueDate != nil {
+		dueDateStr = salesOrder.DueDate.Format("2006-01-02")
+	}
+
+	shippingAddrStr := ""
+	if customer != nil && customer.ShippingStreet != "" {
+		shippingAddrStr = formatAddress(customer.ShippingStreet, customer.ShippingCity, customer.ShippingState, customer.ShippingCode, customer.ShippingCountry)
+	}
+
+	payload := shared_events.NotificationRequestedPayload{
+		OrganizationID: salesOrder.OrganizationID.String(),
+		Recipient:      recipientEmail,
+		Subject:        fmt.Sprintf("Sales Order %s from %s", orderNum, orgName),
+		TemplateName:   "sales_order_sent",
+		TemplateData: map[string]interface{}{
+			"order_number":      orderNum,
+			"customer_name":     customerName,
+			"organization_name": orgName,
+			"order_date":        salesOrder.OrderDate.Format("2006-01-02"),
+			"due_date":          dueDateStr,
+			"status":            strings.ToUpper(string(salesOrder.Status)),
+			"shipping_address":  shippingAddrStr,
+			"sub_total":         fmt.Sprintf("%.2f", salesOrder.SubTotal),
+			"total_amount":      fmt.Sprintf("%.2f", salesOrder.TotalAmount),
+			"currency":          currency,
+			"attachment_name":   fmt.Sprintf("SalesOrder-%s.pdf", orderNum),
+		},
+		CC:            ccEmails,
+		SourceService: "billing-service",
+		ReferenceID:   salesOrder.ID.String(),
+		ReferenceType: "sales_order",
+		CustomerID:    salesOrder.CustomerID.String(),
+		Attachments:   attachments,
+	}
+
+	notifMetadata := shared_events.NewEventMetadata(
+		shared_events.NotificationRequested,
+		shared_events.AggregateNotification,
+		salesOrder.ID.String(),
+	)
+
+	if err := s.eventPublisher.Publish(ctx, notifMetadata, payload); err != nil {
+		fmt.Printf("[ERROR] Failed to publish notification request for sales order %s: %v\n", salesOrder.ID, err)
+		return err
+	}
+	fmt.Printf("[INFO] Published notification request for sales order %s to %s with %d attachment(s)\n", salesOrder.ID, recipientEmail, len(attachments))
+	return nil
 }
