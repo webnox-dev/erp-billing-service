@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"image"
+	"image/draw"
 	_ "image/gif"
 	_ "image/jpeg"
 	png "image/png"
@@ -204,12 +205,18 @@ func (s *PDFService) GenerateInvoicePDF(
 		// End clipping
 		pdf.ClipEnd()
 
-		// Draw a clean, subtle circular border around the logo
-		pdf.SetDrawColor(lineR, lineG, lineB)
-		pdf.SetLineWidth(0.2)
-		pdf.Circle(centerX, centerY, r, "D")
-		
-		leftX = 15.0 + (r * 2.0) + 6.0 // 6mm gap after the round logo
+		if pdf.Error() != nil {
+			fmt.Printf("[WARNING] gofpdf failed to embed logo %s: %v. Continuing without logo.\n", logoTempPath, pdf.Error())
+			pdf.ClearError()
+			leftX = 15.0
+		} else {
+			// Draw a clean, subtle circular border around the logo
+			pdf.SetDrawColor(lineR, lineG, lineB)
+			pdf.SetLineWidth(0.2)
+			pdf.Circle(centerX, centerY, r, "D")
+			
+			leftX = 15.0 + (r * 2.0) + 6.0 // 6mm gap after the round logo
+		}
 	}
 
 	pdf.SetXY(leftX, 15)
@@ -421,9 +428,10 @@ func (s *PDFService) GenerateInvoicePDF(
 		}
 	}
 	
-	nameLines = pdf.SplitLines([]byte(nameVal), 54.0)
-	emailLines = pdf.SplitLines([]byte(emailVal), 54.0)
-	phoneLines = pdf.SplitLines([]byte(phoneVal), 54.0)
+	pdf.SetFont("Arial", "", 8.5)
+	nameLines = safeSplitLines(pdf, []byte(nameVal), 54.0)
+	emailLines = safeSplitLines(pdf, []byte(emailVal), 54.0)
+	phoneLines = safeSplitLines(pdf, []byte(phoneVal), 54.0)
 	
 	maxCustLines := len(nameLines)
 	if len(emailLines) > maxCustLines {
@@ -458,7 +466,7 @@ func (s *PDFService) GenerateInvoicePDF(
 				label: col.label,
 			}
 			addrText := formatAddress(col.street, col.city, col.state, col.code, col.country)
-			layout.addressLines = pdf.SplitLines([]byte(addrText), textWidth)
+			layout.addressLines = safeSplitLines(pdf, []byte(addrText), textWidth)
 
 			// Calculate height for this column: Label (4.5) + Gap (2.0) + Address lines
 			h := 4.5 + 2.0 + float64(len(layout.addressLines))*4.0
@@ -606,7 +614,7 @@ func (s *PDFService) GenerateInvoicePDF(
 		var summaryHeight float64 = 0.0
 
 		if workOrder != nil {
-			summaryLines = pdf.SplitLines([]byte(workOrder.Summary), 170.0)
+			summaryLines = safeSplitLines(pdf, []byte(workOrder.Summary), 170.0)
 			summaryHeight = float64(len(summaryLines)) * 4.0
 			workOrderHeight = 28.0 + summaryHeight // Inner header (6) + fields (12) + description (10)
 			totalCardHeight += workOrderHeight
@@ -633,7 +641,7 @@ func (s *PDFService) GenerateInvoicePDF(
 			var notesLines [][]byte
 			notesHeight := 0.0
 			if appt.Notes != "" {
-				notesLines = pdf.SplitLines([]byte(appt.Notes), 170.0)
+				notesLines = safeSplitLines(pdf, []byte(appt.Notes), 170.0)
 				notesHeight = float64(len(notesLines))*4.0 + 4.0
 			}
 
@@ -959,10 +967,10 @@ func (s *PDFService) GenerateInvoicePDF(
 		pdf.SetFont("Arial", "", 8.5)
 
 		for i, item := range services {
-			nameLines := pdf.SplitLines([]byte(item.Name), 58.0)
+			nameLines := safeSplitLines(pdf, []byte(item.Name), 58.0)
 			var descLines [][]byte
 			if item.Description != "" {
-				descLines = pdf.SplitLines([]byte(item.Description), 58.0)
+				descLines = safeSplitLines(pdf, []byte(item.Description), 58.0)
 			}
 			lineHeight := 4.0
 			totalTextHeight := float64(len(nameLines)) * lineHeight
@@ -1049,10 +1057,10 @@ func (s *PDFService) GenerateInvoicePDF(
 		pdf.SetFont("Arial", "", 8.5)
 
 		for i, item := range parts {
-			nameLines := pdf.SplitLines([]byte(item.Name), 58.0)
+			nameLines := safeSplitLines(pdf, []byte(item.Name), 58.0)
 			var descLines [][]byte
 			if item.Description != "" {
-				descLines = pdf.SplitLines([]byte(item.Description), 58.0)
+				descLines = safeSplitLines(pdf, []byte(item.Description), 58.0)
 			}
 			lineHeight := 4.0
 			totalTextHeight := float64(len(nameLines)) * lineHeight
@@ -1188,7 +1196,7 @@ func (s *PDFService) GenerateInvoicePDF(
 	// 6. Notes & Signature Sections
 	trimmedNotes := strings.TrimSpace(invoice.Notes)
 	if trimmedNotes != "" && trimmedNotes != "<nil>" {
-		notesLines := pdf.SplitLines([]byte(trimmedNotes), 180.0)
+		notesLines := safeSplitLines(pdf, []byte(trimmedNotes), 180.0)
 		notesH := float64(len(notesLines))*4.0 + 10.0
 		checkPageBreak(notesH)
 		pdf.SetY(pdf.GetY() + 6)
@@ -1203,7 +1211,7 @@ func (s *PDFService) GenerateInvoicePDF(
 
 	trimmedTerms := strings.TrimSpace(invoice.Terms)
 	if trimmedTerms != "" && trimmedTerms != "<nil>" {
-		termsLines := pdf.SplitLines([]byte(trimmedTerms), 180.0)
+		termsLines := safeSplitLines(pdf, []byte(trimmedTerms), 180.0)
 		termsH := float64(len(termsLines))*4.0 + 10.0
 		checkPageBreak(termsH)
 		pdf.SetY(pdf.GetY() + 6)
@@ -1304,68 +1312,96 @@ func containsIgnoreCase(s, substr string) bool {
 	return strings.Contains(strings.ToLower(s), strings.ToLower(substr))
 }
 
+// safeSplitLines wraps gofpdf.SplitLines to ensure that an uninitialized font or prior
+// internal pdf error does not trigger an index out of bounds panic.
+func safeSplitLines(pdf *gofpdf.Fpdf, txt []byte, w float64) [][]byte {
+	if len(txt) == 0 {
+		return [][]byte{}
+	}
+	if pdf.Error() != nil {
+		pdf.ClearError()
+	}
+	lines := pdf.SplitLines(txt, w)
+	if len(lines) == 0 {
+		return [][]byte{txt}
+	}
+	return lines
+}
+
 // downloadLogoToTemp fetches an image URL (resolving relative paths if needed)
-// and writes it to a temporary PNG file so gofpdf can embed it reliably.
+// and converts it to a standard 8-bit RGBA PNG file so gofpdf can embed it reliably.
 // The caller is responsible for removing the temp file when done.
 func downloadLogoToTemp(logoURL string) (string, error) {
 	if logoURL == "" {
 		return "", fmt.Errorf("empty logo URL")
 	}
 
+	var data []byte
+	var contentType string
+
 	// 1. Check if it's already a local file path on disk
 	if strings.HasPrefix(logoURL, "/") || strings.HasPrefix(logoURL, "./") {
-		if _, err := os.Stat(logoURL); err == nil {
-			return logoURL, nil
+		if content, err := os.ReadFile(logoURL); err == nil {
+			data = content
+		} else {
+			return "", err
 		}
-	}
-
-	fullURL := logoURL
-	if !strings.HasPrefix(logoURL, "http://") && !strings.HasPrefix(logoURL, "https://") {
-		mediaBaseURL := os.Getenv("MEDIA_BASE_URL")
-		if mediaBaseURL == "" {
-			mediaBaseURL = "https://webnox.blr1.digitaloceanspaces.com/"
+	} else {
+		fullURL := logoURL
+		if !strings.HasPrefix(logoURL, "http://") && !strings.HasPrefix(logoURL, "https://") {
+			mediaBaseURL := os.Getenv("MEDIA_BASE_URL")
+			if mediaBaseURL == "" {
+				mediaBaseURL = "https://webnox.blr1.digitaloceanspaces.com/"
+			}
+			if !strings.HasSuffix(mediaBaseURL, "/") && !strings.HasPrefix(logoURL, "/") {
+				mediaBaseURL += "/"
+			} else if strings.HasSuffix(mediaBaseURL, "/") && strings.HasPrefix(logoURL, "/") {
+				mediaBaseURL = strings.TrimSuffix(mediaBaseURL, "/")
+			}
+			fullURL = mediaBaseURL + logoURL
 		}
-		// Ensure mediaBaseURL ends with a slash if needed, and logoURL doesn't start with a slash
-		if !strings.HasSuffix(mediaBaseURL, "/") && !strings.HasPrefix(logoURL, "/") {
-			mediaBaseURL += "/"
-		} else if strings.HasSuffix(mediaBaseURL, "/") && strings.HasPrefix(logoURL, "/") {
-			mediaBaseURL = strings.TrimSuffix(mediaBaseURL, "/")
+
+		resp, err := http.Get(fullURL)
+		if err != nil {
+			return "", fmt.Errorf("http get: %w", err)
 		}
-		fullURL = mediaBaseURL + logoURL
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			return "", fmt.Errorf("non-200 response from %s: %d", fullURL, resp.StatusCode)
+		}
+
+		contentType = resp.Header.Get("Content-Type")
+		readData, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return "", fmt.Errorf("read body: %w", err)
+		}
+		data = readData
 	}
 
-	resp, err := http.Get(fullURL)
-	if err != nil {
-		return "", fmt.Errorf("http get: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("non-200 response from %s: %d", fullURL, resp.StatusCode)
-	}
-
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("read body: %w", err)
-	}
-
-	// Decode any standard image format (png, jpeg, gif) and encode as PNG for gofpdf compatibility
+	// Decode standard image format (png, jpeg, gif) and convert to 8-bit RGBA PNG for gofpdf compatibility
 	img, _, err := image.Decode(bytes.NewReader(data))
 	if err == nil {
+		bounds := img.Bounds()
+		rgba := image.NewRGBA(bounds)
+		draw.Draw(rgba, bounds, img, bounds.Min, draw.Src)
+
 		tmp, err := os.CreateTemp("", "org-logo-*.png")
 		if err != nil {
 			return "", fmt.Errorf("create temp: %w", err)
 		}
 		defer tmp.Close()
-		if err := png.Encode(tmp, img); err == nil {
+
+		enc := &png.Encoder{CompressionLevel: png.DefaultCompression}
+		if err := enc.Encode(tmp, rgba); err == nil {
 			return tmp.Name(), nil
 		}
+		os.Remove(tmp.Name())
 	}
 
 	// Fallback to raw copy if image decode failed
 	ext := ".png"
-	ct := resp.Header.Get("Content-Type")
-	if strings.Contains(ct, "jpeg") || strings.Contains(ct, "jpg") {
+	if strings.Contains(contentType, "jpeg") || strings.Contains(contentType, "jpg") {
 		ext = ".jpg"
 	}
 	tmp, err := os.CreateTemp("", "org-logo-*"+ext)
@@ -1454,7 +1490,13 @@ func (s *PDFService) GenerateSalesOrderPDF(
 	startY := pdf.GetY()
 	if logoTempPath != "" {
 		pdf.ImageOptions(logoTempPath, 15, startY, 35, 0, false, gofpdf.ImageOptions{ImageType: "", ReadDpi: true}, 0, "")
-		pdf.SetXY(55, startY)
+		if pdf.Error() != nil {
+			fmt.Printf("[WARNING] gofpdf failed to embed sales order logo %s: %v. Continuing without logo.\n", logoTempPath, pdf.Error())
+			pdf.ClearError()
+			pdf.SetXY(15, startY)
+		} else {
+			pdf.SetXY(55, startY)
+		}
 	} else {
 		pdf.SetXY(15, startY)
 	}

@@ -252,6 +252,13 @@ func (h *InvoiceHandler) SendInvoice(w http.ResponseWriter, r *http.Request) {
 
 // DownloadInvoicePDF handles PDF download requests by streaming from S3
 func (h *InvoiceHandler) DownloadInvoicePDF(w http.ResponseWriter, r *http.Request) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			fmt.Printf("[ERROR] Panic in DownloadInvoicePDF: %v\n", rec)
+			http.Error(w, "internal server error generating invoice pdf", http.StatusInternalServerError)
+		}
+	}()
+
 	vars := mux.Vars(r)
 	id, err := uuid.Parse(vars["id"])
 	if err != nil {
@@ -278,6 +285,13 @@ func (h *InvoiceHandler) DownloadInvoicePDF(w http.ResponseWriter, r *http.Reque
 
 // PreviewInvoicePDF handles PDF preview requests (inline display) by streaming from S3
 func (h *InvoiceHandler) PreviewInvoicePDF(w http.ResponseWriter, r *http.Request) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			fmt.Printf("[ERROR] Panic in PreviewInvoicePDF: %v\n", rec)
+			http.Error(w, "internal server error generating invoice preview", http.StatusInternalServerError)
+		}
+	}()
+
 	vars := mux.Vars(r)
 	id, err := uuid.Parse(vars["id"])
 	if err != nil {
