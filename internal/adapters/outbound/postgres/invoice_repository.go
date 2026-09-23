@@ -68,6 +68,61 @@ func (r *InvoiceRepository) ListByModule(ctx context.Context, orgID uuid.UUID, s
 	return invoices, err
 }
 
+func (r *InvoiceRepository) ListWithFilters(ctx context.Context, filter domain.InvoiceFilter) ([]domain.Invoice, error) {
+	var invoices []domain.Invoice
+	query := r.db.WithContext(ctx).
+		Preload("Items").
+		Preload("Payments")
+
+	if filter.OrganizationID != uuid.Nil {
+		query = query.Where("invoices.organization_id = ?", filter.OrganizationID)
+	}
+	if filter.SourceSystem != nil && *filter.SourceSystem != "" {
+		query = query.Where("invoices.source_system = ?", *filter.SourceSystem)
+	}
+	if filter.CustomerID != nil {
+		query = query.Where("invoices.customer_id = ?", *filter.CustomerID)
+	}
+	if filter.CategoryID != nil {
+		query = query.Where("invoices.service_category_id = ? OR invoices.part_category_id = ? OR invoices.id IN (SELECT invoice_id FROM invoice_items WHERE service_category_id = ? OR part_category_id = ?)", *filter.CategoryID, *filter.CategoryID, *filter.CategoryID, *filter.CategoryID)
+	}
+	if filter.Status != nil && *filter.Status != "" {
+		query = query.Where("LOWER(invoices.status) = LOWER(?)", *filter.Status)
+	}
+	if filter.PaymentTerms != nil && *filter.PaymentTerms != "" {
+		query = query.Where("LOWER(invoices.payment_terms) = LOWER(?)", *filter.PaymentTerms)
+	}
+	if filter.Search != nil && *filter.Search != "" {
+		pattern := "%" + *filter.Search + "%"
+		query = query.Where("invoices.invoice_number ILIKE ? OR invoices.subject ILIKE ? OR invoices.customer_id IN (SELECT id FROM customers_readonly WHERE display_name ILIKE ? OR company_name ILIKE ?)", pattern, pattern, pattern, pattern)
+	}
+	if filter.DueDateStart != nil {
+		query = query.Where("invoices.due_date >= ?", *filter.DueDateStart)
+	}
+	if filter.DueDateEnd != nil {
+		query = query.Where("invoices.due_date <= ?", *filter.DueDateEnd)
+	}
+	if filter.MinAmount != nil {
+		query = query.Where("invoices.total_amount >= ?", *filter.MinAmount)
+	}
+	if filter.MaxAmount != nil {
+		query = query.Where("invoices.total_amount <= ?", *filter.MaxAmount)
+	}
+	if filter.CreatedAtStart != nil {
+		query = query.Where("invoices.created_at >= ?", *filter.CreatedAtStart)
+	}
+	if filter.CreatedAtEnd != nil {
+		query = query.Where("invoices.created_at <= ?", *filter.CreatedAtEnd)
+	}
+
+	err := query.Order("invoices.created_at desc").Find(&invoices).Error
+	if err == nil {
+		r.populateInvoicesAddressFields(ctx, invoices)
+	}
+	return invoices, err
+}
+
+
 func (r *InvoiceRepository) populateInvoiceAddressFields(ctx context.Context, invoice *domain.Invoice) {
 	if invoice == nil {
 		return
@@ -202,19 +257,34 @@ func (r *InvoiceRepository) populateInvoicesAddressFields(ctx context.Context, i
 
 func (r *InvoiceRepository) Delete(ctx context.Context, id uuid.UUID) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		// First delete all invoice items
-		if err := tx.Delete(&domain.InvoiceItem{}, "invoice_id = ?", id).Error; err != nil {
-			return fmt.Errorf("failed to delete invoice items: %w", err)
+		// Step 1: NULL out sales_orders.invoice_id that reference this invoice.
+		// This must happen first to release the fk_sales_order_invoice FK constraint
+		// before the invoice row itself is soft-deleted.
+		if err := tx.Exec(
+			"UPDATE sales_orders SET invoice_id = NULL, updated_at = NOW() WHERE invoice_id = ?",
+			id,
+		).Error; err != nil {
+			return fmt.Errorf("failed to unlink invoice from sales orders: %w", err)
 		}
 
-		// Then delete all payments
-		if err := tx.Delete(&domain.Payment{}, "invoice_id = ?", id).Error; err != nil {
-			return fmt.Errorf("failed to delete payments: %w", err)
+		// Step 2: Soft-delete all audit logs for this invoice (sets deleted_at)
+		if err := tx.Where("invoice_id = ?", id).Delete(&domain.InvoiceAuditLog{}).Error; err != nil {
+			return fmt.Errorf("failed to soft-delete invoice audit logs: %w", err)
 		}
 
-		// Finally delete the invoice
+		// Step 3: Soft-delete all invoice line items (sets deleted_at)
+		if err := tx.Where("invoice_id = ?", id).Delete(&domain.InvoiceItem{}).Error; err != nil {
+			return fmt.Errorf("failed to soft-delete invoice items: %w", err)
+		}
+
+		// Step 4: Soft-delete all payments linked to this invoice (sets deleted_at)
+		if err := tx.Where("invoice_id = ?", id).Delete(&domain.Payment{}).Error; err != nil {
+			return fmt.Errorf("failed to soft-delete invoice payments: %w", err)
+		}
+
+		// Step 5: Soft-delete the invoice itself (sets deleted_at)
 		if err := tx.Delete(&domain.Invoice{}, "id = ?", id).Error; err != nil {
-			return fmt.Errorf("failed to delete invoice: %w", err)
+			return fmt.Errorf("failed to soft-delete invoice: %w", err)
 		}
 
 		return nil
@@ -246,5 +316,22 @@ func (r *InvoiceRepository) GetNextInvoiceNumber(ctx context.Context, orgID uuid
 }
 
 func (r *InvoiceRepository) ClearItems(ctx context.Context, invoiceID uuid.UUID) error {
-	return r.db.WithContext(ctx).Delete(&domain.InvoiceItem{}, "invoice_id = ?", invoiceID).Error
+	return r.db.WithContext(ctx).Where("invoice_id = ?", invoiceID).Delete(&domain.InvoiceItem{}).Error
+}
+
+// ListBySalesOrderID retrieves all invoices associated with the given sales order.
+// Invoices link back to a sales order via the invoices.sales_order_id column.
+// This correctly handles cases where multiple invoices exist for a single sales order.
+func (r *InvoiceRepository) ListBySalesOrderID(ctx context.Context, salesOrderID uuid.UUID) ([]domain.Invoice, error) {
+	var invoices []domain.Invoice
+	err := r.db.WithContext(ctx).
+		Preload("Items").
+		Preload("Payments").
+		Where("sales_order_id = ?", salesOrderID).
+		Order("created_at desc").
+		Find(&invoices).Error
+	if err == nil {
+		r.populateInvoicesAddressFields(ctx, invoices)
+	}
+	return invoices, err
 }

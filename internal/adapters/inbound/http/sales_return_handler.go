@@ -181,19 +181,43 @@ func (h *SalesReturnHandler) ProcessRefund(w http.ResponseWriter, r *http.Reques
 	vars := mux.Vars(r)
 	id, err := uuid.Parse(vars["id"])
 	if err != nil {
-		http.Error(w, "Invalid sales return ID", http.StatusBadRequest)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid sales return ID"})
 		return
 	}
 
 	var req dto.ProcessRefundRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid request body: " + err.Error()})
 		return
 	}
 
 	salesReturn, err := h.service.ProcessRefund(id, &req)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		w.Header().Set("Content-Type", "application/json")
+		errStr := err.Error()
+		// Business rule violations → 422 Unprocessable Entity
+		// DB/infrastructure errors → 500
+		switch {
+		case strings.Contains(errStr, "cannot process refund"),
+			strings.Contains(errStr, "no paid invoice found"),
+			strings.Contains(errStr, "no invoices found"),
+			strings.Contains(errStr, "payment must be recorded"),
+			strings.Contains(errStr, "cannot transition"):
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			json.NewEncoder(w).Encode(map[string]string{"error": errStr})
+		case strings.Contains(errStr, "failed to find sales return"),
+			strings.Contains(errStr, "not found"):
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]string{"error": errStr})
+		default:
+			log.Printf("[ERROR] ProcessRefund internal error for return %s: %v", id, err)
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": "An internal error occurred while processing the refund. Please try again."})
+		}
 		return
 	}
 

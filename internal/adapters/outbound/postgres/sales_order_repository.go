@@ -75,6 +75,28 @@ func (r *SalesOrderRepository) List(orgID uuid.UUID, filters *dto.SalesOrderFilt
 		custPattern := "%" + *filters.CustomerName + "%"
 		query = query.Where("sales_orders.customer_id IN (SELECT id FROM customers_readonly WHERE display_name ILIKE ? OR company_name ILIKE ?)", custPattern, custPattern)
 	}
+	if filters.ItemName != nil && *filters.ItemName != "" {
+		itemPattern := "%" + *filters.ItemName + "%"
+		query = query.Where("sales_orders.id IN (SELECT sales_order_id FROM sales_order_items WHERE name ILIKE ?)", itemPattern)
+	}
+	if filters.OrderDateStart != nil {
+		query = query.Where("sales_orders.order_date >= ?", *filters.OrderDateStart)
+	}
+	if filters.OrderDateEnd != nil {
+		query = query.Where("sales_orders.order_date <= ?", *filters.OrderDateEnd)
+	}
+	if filters.DueDateStart != nil {
+		query = query.Where("sales_orders.due_date >= ?", *filters.DueDateStart)
+	}
+	if filters.DueDateEnd != nil {
+		query = query.Where("sales_orders.due_date <= ?", *filters.DueDateEnd)
+	}
+	if filters.MinAmount != nil {
+		query = query.Where("sales_orders.total_amount >= ?", *filters.MinAmount)
+	}
+	if filters.MaxAmount != nil {
+		query = query.Where("sales_orders.total_amount <= ?", *filters.MaxAmount)
+	}
 	if filters.FromDate != nil {
 		query = query.Where("sales_orders.created_at >= ?", *filters.FromDate)
 	}

@@ -69,6 +69,63 @@ func (r *PaymentRepository) ListByModule(ctx context.Context, orgID uuid.UUID, s
 	return payments, err
 }
 
+// ListWithFilters returns payments filtered by domain.PaymentFilter
+func (r *PaymentRepository) ListWithFilters(ctx context.Context, filter domain.PaymentFilter) ([]domain.Payment, error) {
+	var payments []domain.Payment
+	query := r.db.WithContext(ctx).
+		Joins("JOIN invoices ON invoices.id = payments.invoice_id")
+
+	if filter.OrganizationID != uuid.Nil {
+		query = query.Where("payments.organization_id = ?", filter.OrganizationID)
+	}
+	if filter.SourceSystem != nil && *filter.SourceSystem != "" {
+		query = query.Where("invoices.source_system = ?", *filter.SourceSystem)
+	}
+	if filter.CustomerID != nil {
+		query = query.Where("invoices.customer_id = ?", *filter.CustomerID)
+	}
+	if filter.CustomerName != nil && *filter.CustomerName != "" {
+		custPattern := "%" + *filter.CustomerName + "%"
+		query = query.Where("payments.customer_name ILIKE ? OR invoices.customer_id IN (SELECT id FROM customers_readonly WHERE display_name ILIKE ? OR company_name ILIKE ?)", custPattern, custPattern, custPattern)
+	}
+	if filter.Status != nil && *filter.Status != "" {
+		query = query.Where("LOWER(payments.status) = LOWER(?)", *filter.Status)
+	}
+	if filter.Method != nil && *filter.Method != "" {
+		query = query.Where("LOWER(payments.method) = LOWER(?)", *filter.Method)
+	}
+	if filter.Search != nil && *filter.Search != "" {
+		pattern := "%" + *filter.Search + "%"
+		query = query.Where("invoices.invoice_number ILIKE ? OR payments.reference ILIKE ? OR payments.customer_name ILIKE ? OR invoices.customer_id IN (SELECT id FROM customers_readonly WHERE display_name ILIKE ? OR company_name ILIKE ?)", pattern, pattern, pattern, pattern, pattern)
+	}
+	if filter.InvoiceNumber != nil && *filter.InvoiceNumber != "" {
+		invPattern := "%" + *filter.InvoiceNumber + "%"
+		query = query.Where("invoices.invoice_number ILIKE ?", invPattern)
+	}
+	if filter.PaymentDateStart != nil {
+		query = query.Where("payments.payment_date >= ?", *filter.PaymentDateStart)
+	}
+	if filter.PaymentDateEnd != nil {
+		query = query.Where("payments.payment_date <= ?", *filter.PaymentDateEnd)
+	}
+	if filter.MinAmount != nil {
+		query = query.Where("payments.amount >= ?", *filter.MinAmount)
+	}
+	if filter.MaxAmount != nil {
+		query = query.Where("payments.amount <= ?", *filter.MaxAmount)
+	}
+	if filter.CreatedAtStart != nil {
+		query = query.Where("payments.created_at >= ?", *filter.CreatedAtStart)
+	}
+	if filter.CreatedAtEnd != nil {
+		query = query.Where("payments.created_at <= ?", *filter.CreatedAtEnd)
+	}
+
+	err := query.Order("payments.payment_date desc, payments.created_at desc").Find(&payments).Error
+	return payments, err
+}
+
+
 func (r *PaymentRepository) ListByCustomerIDs(ctx context.Context, orgID uuid.UUID, customerIDs []uuid.UUID) ([]domain.Payment, error) {
 	var payments []domain.Payment
 	query := r.db.WithContext(ctx).

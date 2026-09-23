@@ -214,29 +214,53 @@ func (s *SalesReturnService) ProcessRefund(id uuid.UUID, req *dto.ProcessRefundR
 		return nil, fmt.Errorf("cannot process refund for sales return in %s status or refund already processed", salesReturn.Status)
 	}
 
-	// Retrieve sales order to get invoice
+	// Retrieve sales order to get items for stock update later
 	salesOrder, err := s.salesOrderRepo.FindByID(salesReturn.SalesOrderID)
 	if err != nil {
 		fmt.Printf("[ERROR] Failed to find sales order: %v\n", err)
 		return nil, fmt.Errorf("failed to find sales order: %w", err)
 	}
-	fmt.Printf("[DEBUG] Sales order found: invoice_id=%v\n", salesOrder.InvoiceID)
+	fmt.Printf("[DEBUG] Sales order found: id=%s\n", salesOrder.ID)
 
-	if salesOrder.InvoiceID == nil {
-		fmt.Printf("[ERROR] Sales order has no associated invoice\n")
-		return nil, fmt.Errorf("sales order has no associated invoice")
-	}
-
-	// Retrieve invoice
-	invoice, err := s.invoiceRepo.GetByID(context.Background(), *salesOrder.InvoiceID)
+	// Find the paid invoice for this sales order.
+	// A sales order may have multiple invoices; we look up by sales_order_id on the invoices
+	// table rather than relying on the single sales_orders.invoice_id pointer, which only
+	// tracks the most-recently-linked invoice.
+	invoices, err := s.invoiceRepo.ListBySalesOrderID(context.Background(), salesReturn.SalesOrderID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to find invoice: %w", err)
+		return nil, fmt.Errorf("failed to look up invoices for sales order: %w", err)
 	}
 
-	// Check if invoice can be refunded
-	if !invoice.CanRefund() {
-		return nil, fmt.Errorf("invoice must be paid to process refund")
+	// Find the PAID invoice among all linked invoices
+	var invoice *domain.Invoice
+	for i := range invoices {
+		if invoices[i].CanRefund() {
+			invoice = &invoices[i]
+			break
+		}
 	}
+
+	if invoice == nil {
+		// Friendly fallback: try the sales order's direct invoice_id pointer if set
+		if salesOrder.InvoiceID != nil {
+			fallback, ferr := s.invoiceRepo.GetByID(context.Background(), *salesOrder.InvoiceID)
+			if ferr == nil && fallback != nil && fallback.CanRefund() {
+				invoice = fallback
+			}
+		}
+	}
+
+	if invoice == nil {
+		if len(invoices) == 0 {
+			return nil, fmt.Errorf("no invoices found for this sales order — cannot process refund")
+		}
+		return nil, fmt.Errorf(
+			"no paid invoice found for this sales order (found %d invoice(s), none in PAID status) — payment must be recorded on an invoice before a refund can be processed",
+			len(invoices),
+		)
+	}
+
+	fmt.Printf("[DEBUG] Found paid invoice for refund: id=%s, status=%s\n", invoice.ID, invoice.Status)
 
 	// Create refund payment (negative amount)
 	refundPayment := &domain.Payment{

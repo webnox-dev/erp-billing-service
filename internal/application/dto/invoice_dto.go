@@ -164,3 +164,19 @@ type InvoiceAuditLogResponse struct {
 	PerformedBy string    `json:"performed_by"`
 	CreatedAt   time.Time `json:"created_at"`
 }
+
+type InvoiceFilterParams struct {
+	CustomerID     *uuid.UUID
+	CategoryID     *uuid.UUID
+	Status         *string
+	PaymentTerms   *string
+	Search         *string
+	Module         *string
+	DueDateStart   *time.Time
+	DueDateEnd     *time.Time
+	MinAmount      *float64
+	MaxAmount      *float64
+	CreatedAtStart *time.Time
+	CreatedAtEnd   *time.Time
+}
+

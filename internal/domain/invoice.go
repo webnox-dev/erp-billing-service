@@ -194,8 +194,9 @@ type InvoiceItem struct {
 	// Billing service stores and returns this data but never interprets it
 	Metadata json.RawMessage `gorm:"type:jsonb" json:"metadata,omitempty"`
 
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	CreatedAt time.Time  `json:"created_at"`
+	UpdatedAt time.Time  `json:"updated_at"`
+	DeletedAt *time.Time `gorm:"index" json:"deleted_at,omitempty"`
 }
 
 // Payment represents a payment made against an invoice
@@ -213,6 +214,7 @@ type Payment struct {
 	Notes          string        `gorm:"type:text" json:"notes"`
 	CreatedAt      time.Time     `json:"created_at"`
 	UpdatedAt      time.Time     `json:"updated_at"`
+	DeletedAt      *time.Time    `gorm:"index" json:"deleted_at,omitempty"`
 }
 
 // PaymentType represents the type of payment
@@ -248,13 +250,14 @@ func (p *Payment) CanVoid() bool {
 }
 
 type InvoiceAuditLog struct {
-	ID             uuid.UUID `gorm:"type:uuid;primaryKey" json:"id"`
-	OrganizationID uuid.UUID `gorm:"type:uuid;index" json:"organization_id"`
-	InvoiceID      uuid.UUID `gorm:"type:uuid;index" json:"invoice_id"`
-	Action         string    `gorm:"type:varchar(100)" json:"action"`
-	OldStatus      string    `gorm:"type:varchar(50)" json:"old_status"`
-	NewStatus      string    `gorm:"type:varchar(50)" json:"new_status"`
-	Notes          string    `gorm:"type:text" json:"notes"`
-	PerformedBy    string    `gorm:"type:varchar(255)" json:"performed_by"`
-	CreatedAt      time.Time `json:"created_at"`
+	ID             uuid.UUID  `gorm:"type:uuid;primaryKey" json:"id"`
+	OrganizationID uuid.UUID  `gorm:"type:uuid;index" json:"organization_id"`
+	InvoiceID      uuid.UUID  `gorm:"type:uuid;index" json:"invoice_id"`
+	Action         string     `gorm:"type:varchar(100)" json:"action"`
+	OldStatus      string     `gorm:"type:varchar(50)" json:"old_status"`
+	NewStatus      string     `gorm:"type:varchar(50)" json:"new_status"`
+	Notes          string     `gorm:"type:text" json:"notes"`
+	PerformedBy    string     `gorm:"type:varchar(255)" json:"performed_by"`
+	CreatedAt      time.Time  `json:"created_at"`
+	DeletedAt      *time.Time `gorm:"index" json:"deleted_at,omitempty"`
 }

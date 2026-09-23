@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
+	"strings"
+	"time"
 
 	"erp-billing-service/internal/application"
 	"erp-billing-service/internal/application/dto"
 	"erp-billing-service/internal/domain"
-	"strings"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
@@ -94,36 +96,110 @@ func (h *InvoiceHandler) ListInvoices(w http.ResponseWriter, r *http.Request) {
 	orgIDStr := r.Header.Get("X-Organization-ID")
 	orgID, _ := uuid.Parse(orgIDStr)
 
-	// Get module filter from query params (optional)
-	moduleFilter := strings.ToUpper(r.URL.Query().Get("module"))
+	filterParams := dto.InvoiceFilterParams{}
 
-	var err error
-	var result interface{}
-
-	if moduleFilter != "" {
-		// Filter by specific module (FSM, CRM, INVENTORY)
-		var sourceSystem domain.SourceSystem
-		switch moduleFilter {
-		case "FSM":
-			// For FSM/Billing dashboard, we show both FSM-specific and MANUAL invoices
-			result, err = h.service.ListInvoices(r.Context(), orgID)
-		case "CRM":
-			sourceSystem = domain.SourceSystemCRM
-		case "INVENTORY", "IMS":
-			sourceSystem = domain.SourceSystemInventory
-		default:
-			// Invalid module, return all
-			result, err = h.service.ListInvoices(r.Context(), orgID)
+	// Module filter
+	if mod := r.URL.Query().Get("module"); mod != "" {
+		upperMod := strings.ToUpper(mod)
+		if upperMod == "IMS" {
+			upperMod = "INVENTORY"
 		}
-
-		if sourceSystem != "" {
-			result, err = h.service.ListInvoicesByModule(r.Context(), orgID, sourceSystem)
+		if upperMod != "FSM" {
+			filterParams.Module = &upperMod
 		}
-	} else {
-		// No filter, return all invoices
-		result, err = h.service.ListInvoices(r.Context(), orgID)
 	}
 
+	// Status filter
+	if status := r.URL.Query().Get("status"); status != "" {
+		filterParams.Status = &status
+	}
+
+	// Customer filter
+	if custIDStr := r.URL.Query().Get("customer_id"); custIDStr != "" {
+		if cid, err := uuid.Parse(custIDStr); err == nil {
+			filterParams.CustomerID = &cid
+		}
+	}
+
+	// Payment terms filter
+	if terms := r.URL.Query().Get("payment_terms"); terms != "" {
+		filterParams.PaymentTerms = &terms
+	}
+
+	// Category filter
+	if catIDStr := r.URL.Query().Get("category_id"); catIDStr != "" {
+		if catID, err := uuid.Parse(catIDStr); err == nil {
+			filterParams.CategoryID = &catID
+		}
+	}
+
+	// Search filter
+	if search := r.URL.Query().Get("search"); search != "" {
+		filterParams.Search = &search
+	}
+
+	// Due date filters
+	if dueStart := r.URL.Query().Get("due_date_start"); dueStart != "" {
+		if t, err := time.Parse("2006-01-02", dueStart); err == nil {
+			filterParams.DueDateStart = &t
+		} else if t, err := time.Parse(time.RFC3339, dueStart); err == nil {
+			filterParams.DueDateStart = &t
+		}
+	}
+
+	if dueEnd := r.URL.Query().Get("due_date_end"); dueEnd != "" {
+		if t, err := time.Parse("2006-01-02", dueEnd); err == nil {
+			endOfDay := time.Date(t.Year(), t.Month(), t.Day(), 23, 59, 59, 999999999, time.UTC)
+			filterParams.DueDateEnd = &endOfDay
+		} else if t, err := time.Parse(time.RFC3339, dueEnd); err == nil {
+			filterParams.DueDateEnd = &t
+		}
+	}
+
+	// Amount range filters
+	if minAmountStr := r.URL.Query().Get("min_amount"); minAmountStr != "" {
+		if val, err := strconv.ParseFloat(minAmountStr, 64); err == nil {
+			filterParams.MinAmount = &val
+		}
+	}
+	if maxAmountStr := r.URL.Query().Get("max_amount"); maxAmountStr != "" {
+		if val, err := strconv.ParseFloat(maxAmountStr, 64); err == nil {
+			filterParams.MaxAmount = &val
+		}
+	}
+
+	// Created at date filters
+	if start := r.URL.Query().Get("created_at_start"); start != "" {
+		if t, err := time.Parse("2006-01-02", start); err == nil {
+			filterParams.CreatedAtStart = &t
+		} else if t, err := time.Parse(time.RFC3339, start); err == nil {
+			filterParams.CreatedAtStart = &t
+		}
+	} else if start := r.URL.Query().Get("start_date"); start != "" {
+		if t, err := time.Parse("2006-01-02", start); err == nil {
+			filterParams.CreatedAtStart = &t
+		} else if t, err := time.Parse(time.RFC3339, start); err == nil {
+			filterParams.CreatedAtStart = &t
+		}
+	}
+
+	if end := r.URL.Query().Get("created_at_end"); end != "" {
+		if t, err := time.Parse("2006-01-02", end); err == nil {
+			endOfDay := time.Date(t.Year(), t.Month(), t.Day(), 23, 59, 59, 999999999, time.UTC)
+			filterParams.CreatedAtEnd = &endOfDay
+		} else if t, err := time.Parse(time.RFC3339, end); err == nil {
+			filterParams.CreatedAtEnd = &t
+		}
+	} else if end := r.URL.Query().Get("end_date"); end != "" {
+		if t, err := time.Parse("2006-01-02", end); err == nil {
+			endOfDay := time.Date(t.Year(), t.Month(), t.Day(), 23, 59, 59, 999999999, time.UTC)
+			filterParams.CreatedAtEnd = &endOfDay
+		} else if t, err := time.Parse(time.RFC3339, end); err == nil {
+			filterParams.CreatedAtEnd = &t
+		}
+	}
+
+	result, err := h.service.ListInvoicesWithFilters(r.Context(), orgID, filterParams)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -153,15 +229,26 @@ func (h *InvoiceHandler) DeleteInvoice(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	id, err := uuid.Parse(vars["id"])
 	if err != nil {
-		http.Error(w, "Invalid Invoice ID", http.StatusBadRequest)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid Invoice ID"})
 		return
 	}
 
 	if err := h.service.DeleteInvoice(r.Context(), id); err != nil {
-		if err.Error() == "invoice not found" {
-			http.Error(w, err.Error(), http.StatusNotFound)
-		} else {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+		w.Header().Set("Content-Type", "application/json")
+		errMsg := err.Error()
+		switch {
+		case errMsg == "invoice not found":
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Invoice not found"})
+		case strings.Contains(strings.ToLower(errMsg), "cannot delete") && strings.Contains(strings.ToLower(errMsg), "paid invoice"):
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			json.NewEncoder(w).Encode(map[string]string{"error": errMsg})
+		default:
+			fmt.Printf("[ERROR] Failed to delete invoice %s: %v\n", id, err)
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Failed to delete invoice. Please try again."})
 		}
 		return
 	}

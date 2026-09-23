@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"erp-billing-service/internal/domain"
 
@@ -1231,8 +1232,15 @@ func (s *PDFService) GenerateInvoicePDF(
 	pdf.SetTextColor(primaryR, primaryG, primaryB)
 	pdf.CellFormat(70, 5, "Authorized Signature", "T", 1, "C", false, 0, "")
 
-	if err := pdf.OutputFileAndClose(pdfPath); err != nil {
+	tempPdfPath := filepath.Join(orgDir, fmt.Sprintf("%s_%d.tmp", invoice.ID.String(), time.Now().UnixNano()))
+	if err := pdf.OutputFileAndClose(tempPdfPath); err != nil {
+		os.Remove(tempPdfPath)
 		return "", fmt.Errorf("failed to save PDF file: %w", err)
+	}
+
+	if err := os.Rename(tempPdfPath, pdfPath); err != nil {
+		os.Remove(tempPdfPath)
+		return "", fmt.Errorf("failed to finalize PDF file: %w", err)
 	}
 
 	return pdfPath, nil
@@ -1361,7 +1369,8 @@ func downloadLogoToTemp(logoURL string) (string, error) {
 			fullURL = mediaBaseURL + logoURL
 		}
 
-		resp, err := http.Get(fullURL)
+		client := &http.Client{Timeout: 5 * time.Second}
+		resp, err := client.Get(fullURL)
 		if err != nil {
 			return "", fmt.Errorf("http get: %w", err)
 		}

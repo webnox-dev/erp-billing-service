@@ -158,11 +158,108 @@ func (h *SalesOrderHandler) ListSalesOrders(w http.ResponseWriter, r *http.Reque
 		filters.Search = &search
 	}
 
-	if startDate := r.URL.Query().Get("start_date"); startDate != "" {
-		if t, err := time.Parse("2006-01-02", startDate); err == nil {
+	if itemName := r.URL.Query().Get("item_name"); itemName != "" {
+		filters.ItemName = &itemName
+	}
+
+	// Amount range filters
+	if minAmountStr := r.URL.Query().Get("min_amount"); minAmountStr != "" {
+		if val, err := strconv.ParseFloat(minAmountStr, 64); err == nil {
+			filters.MinAmount = &val
+		}
+	}
+	if maxAmountStr := r.URL.Query().Get("max_amount"); maxAmountStr != "" {
+		if val, err := strconv.ParseFloat(maxAmountStr, 64); err == nil {
+			filters.MaxAmount = &val
+		}
+	}
+
+	dateType := r.URL.Query().Get("date_type")
+
+	// Order date filters
+	if orderStart := r.URL.Query().Get("order_date_start"); orderStart != "" {
+		if t, err := time.Parse("2006-01-02", orderStart); err == nil {
+			filters.OrderDateStart = &t
+		} else if t, err := time.Parse(time.RFC3339, orderStart); err == nil {
+			filters.OrderDateStart = &t
+		}
+	} else if dateType == "order_date" {
+		if startDate := r.URL.Query().Get("start_date"); startDate != "" {
+			if t, err := time.Parse("2006-01-02", startDate); err == nil {
+				filters.OrderDateStart = &t
+			} else if t, err := time.Parse(time.RFC3339, startDate); err == nil {
+				filters.OrderDateStart = &t
+			}
+		}
+	}
+
+	if orderEnd := r.URL.Query().Get("order_date_end"); orderEnd != "" {
+		if t, err := time.Parse("2006-01-02", orderEnd); err == nil {
+			endOfDay := time.Date(t.Year(), t.Month(), t.Day(), 23, 59, 59, 999999999, time.UTC)
+			filters.OrderDateEnd = &endOfDay
+		} else if t, err := time.Parse(time.RFC3339, orderEnd); err == nil {
+			filters.OrderDateEnd = &t
+		}
+	} else if dateType == "order_date" {
+		if endDate := r.URL.Query().Get("end_date"); endDate != "" {
+			if t, err := time.Parse("2006-01-02", endDate); err == nil {
+				endOfDay := time.Date(t.Year(), t.Month(), t.Day(), 23, 59, 59, 999999999, time.UTC)
+				filters.OrderDateEnd = &endOfDay
+			} else if t, err := time.Parse(time.RFC3339, endDate); err == nil {
+				filters.OrderDateEnd = &t
+			}
+		}
+	}
+
+	// Due date filters (Expected Shipment Date)
+	if dueStart := r.URL.Query().Get("due_date_start"); dueStart != "" {
+		if t, err := time.Parse("2006-01-02", dueStart); err == nil {
+			filters.DueDateStart = &t
+		} else if t, err := time.Parse(time.RFC3339, dueStart); err == nil {
+			filters.DueDateStart = &t
+		}
+	} else if dateType == "due_date" {
+		if startDate := r.URL.Query().Get("start_date"); startDate != "" {
+			if t, err := time.Parse("2006-01-02", startDate); err == nil {
+				filters.DueDateStart = &t
+			} else if t, err := time.Parse(time.RFC3339, startDate); err == nil {
+				filters.DueDateStart = &t
+			}
+		}
+	}
+
+	if dueEnd := r.URL.Query().Get("due_date_end"); dueEnd != "" {
+		if t, err := time.Parse("2006-01-02", dueEnd); err == nil {
+			endOfDay := time.Date(t.Year(), t.Month(), t.Day(), 23, 59, 59, 999999999, time.UTC)
+			filters.DueDateEnd = &endOfDay
+		} else if t, err := time.Parse(time.RFC3339, dueEnd); err == nil {
+			filters.DueDateEnd = &t
+		}
+	} else if dateType == "due_date" {
+		if endDate := r.URL.Query().Get("end_date"); endDate != "" {
+			if t, err := time.Parse("2006-01-02", endDate); err == nil {
+				endOfDay := time.Date(t.Year(), t.Month(), t.Day(), 23, 59, 59, 999999999, time.UTC)
+				filters.DueDateEnd = &endOfDay
+			} else if t, err := time.Parse(time.RFC3339, endDate); err == nil {
+				filters.DueDateEnd = &t
+			}
+		}
+	}
+
+	// Created at date filters
+	if createdAtStart := r.URL.Query().Get("created_at_start"); createdAtStart != "" {
+		if t, err := time.Parse("2006-01-02", createdAtStart); err == nil {
 			filters.FromDate = &t
-		} else if t, err := time.Parse(time.RFC3339, startDate); err == nil {
+		} else if t, err := time.Parse(time.RFC3339, createdAtStart); err == nil {
 			filters.FromDate = &t
+		}
+	} else if dateType == "created_at" {
+		if startDate := r.URL.Query().Get("start_date"); startDate != "" {
+			if t, err := time.Parse("2006-01-02", startDate); err == nil {
+				filters.FromDate = &t
+			} else if t, err := time.Parse(time.RFC3339, startDate); err == nil {
+				filters.FromDate = &t
+			}
 		}
 	} else if fromDate := r.URL.Query().Get("from_date"); fromDate != "" {
 		if t, err := time.Parse("2006-01-02", fromDate); err == nil {
@@ -172,12 +269,21 @@ func (h *SalesOrderHandler) ListSalesOrders(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
-	if endDate := r.URL.Query().Get("end_date"); endDate != "" {
-		if t, err := time.Parse("2006-01-02", endDate); err == nil {
+	if createdAtEnd := r.URL.Query().Get("created_at_end"); createdAtEnd != "" {
+		if t, err := time.Parse("2006-01-02", createdAtEnd); err == nil {
 			endOfDay := time.Date(t.Year(), t.Month(), t.Day(), 23, 59, 59, 999999999, time.UTC)
 			filters.ToDate = &endOfDay
-		} else if t, err := time.Parse(time.RFC3339, endDate); err == nil {
+		} else if t, err := time.Parse(time.RFC3339, createdAtEnd); err == nil {
 			filters.ToDate = &t
+		}
+	} else if dateType == "created_at" {
+		if endDate := r.URL.Query().Get("end_date"); endDate != "" {
+			if t, err := time.Parse("2006-01-02", endDate); err == nil {
+				endOfDay := time.Date(t.Year(), t.Month(), t.Day(), 23, 59, 59, 999999999, time.UTC)
+				filters.ToDate = &endOfDay
+			} else if t, err := time.Parse(time.RFC3339, endDate); err == nil {
+				filters.ToDate = &t
+			}
 		}
 	} else if toDate := r.URL.Query().Get("to_date"); toDate != "" {
 		if t, err := time.Parse("2006-01-02", toDate); err == nil {
@@ -305,8 +411,18 @@ func (h *SalesOrderHandler) MarkAsDelivered(w http.ResponseWriter, r *http.Reque
 	order, err := h.service.MarkAsDelivered(id, &req)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		errMsg := err.Error()
+		if isDBConnError(errMsg) {
+			// Infrastructure / connectivity error – hide internal details from the client
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": "A temporary database error occurred. Please try again in a moment."})
+		} else if strings.Contains(errMsg, "not found") || strings.Contains(errMsg, "no rows") {
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Sales order not found"})
+		} else {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": errMsg})
+		}
 		return
 	}
 
@@ -388,4 +504,33 @@ func (h *SalesOrderHandler) SendSalesOrder(w http.ResponseWriter, r *http.Reques
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(order)
+}
+
+// isDBConnError returns true when the error string indicates a database
+// connectivity or infrastructure problem (e.g. admin-terminated connection,
+// network reset, connection pool exhaustion). These should never be surfaced
+// verbatim to API clients.
+func isDBConnError(errMsg string) bool {
+	connPatterns := []string{
+		"57P01",                           // SQLSTATE: admin termination
+		"57P02",                           // SQLSTATE: crash shutdown
+		"57P03",                           // SQLSTATE: cannot connect now
+		"terminating connection",          // postgres admin command
+		"connection refused",              // TCP-level refusal
+		"connection reset by peer",        // TCP reset
+		"broken pipe",                     // write on closed connection
+		"EOF",                             // unexpected EOF from DB
+		"connection timed out",            // dial timeout
+		"no connection to the server",     // libpq message
+		"failed to connect",               // generic pool failure
+		"connection pool",                 // pool exhaustion
+		"pgconn",                          // pgx connection-level errors
+		"FATAL",                           // PostgreSQL FATAL severity
+	}
+	for _, pattern := range connPatterns {
+		if strings.Contains(errMsg, pattern) {
+			return true
+		}
+	}
+	return false
 }

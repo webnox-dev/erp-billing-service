@@ -46,6 +46,12 @@ func NewS3Service(config *S3Config) (*S3Service, error) {
 	}, nil
 }
 
+// IsConfigured returns true if the S3 bucket, region, and credentials are properly configured
+func (s *S3Service) IsConfigured() bool {
+	return s != nil && s.Config != nil && s.Config.BucketName != "" && s.Config.Region != "" && s.Config.AccessKey != "" && s.Config.SecretKey != ""
+}
+
+
 // UploadFile uploads a file directly to the configured S3 bucket
 func (s *S3Service) UploadFile(key string, contentType string, fileBody io.ReadSeeker) error {
 	_, err := s.client.PutObject(&s3.PutObjectInput{

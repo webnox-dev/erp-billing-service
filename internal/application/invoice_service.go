@@ -17,6 +17,7 @@ import (
 
 	shared_events "github.com/efs/shared-events"
 	"github.com/google/uuid"
+	"golang.org/x/sync/singleflight"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -31,6 +32,7 @@ type InvoiceService struct {
 	inventoryClient outbound.InventoryClient
 	customerClient  outbound.CustomerClient
 	salesOrderRepo  repositories.SalesOrderRepository
+	pdfGroup        singleflight.Group
 }
 
 func NewInvoiceService(
@@ -878,6 +880,16 @@ func (s *InvoiceService) GetInvoice(ctx context.Context, id uuid.UUID) (*dto.Inv
 
 // GetInvoicePDF returns the path to the invoice PDF, generating it if it doesn't exist but should
 func (s *InvoiceService) GetInvoicePDF(ctx context.Context, id uuid.UUID) (string, error) {
+	val, err, _ := s.pdfGroup.Do(id.String(), func() (interface{}, error) {
+		return s.generateInvoicePDFInternal(ctx, id)
+	})
+	if err != nil {
+		return "", err
+	}
+	return val.(string), nil
+}
+
+func (s *InvoiceService) generateInvoicePDFInternal(ctx context.Context, id uuid.UUID) (string, error) {
 	// 1. Get invoice
 	invoice, err := s.invoiceRepo.GetByID(ctx, id)
 	if err != nil {
@@ -964,32 +976,30 @@ func (s *InvoiceService) DeleteInvoice(ctx context.Context, id uuid.UUID) error 
 	// 1. Get existing invoice to verify it exists
 	invoice, err := s.invoiceRepo.GetByID(ctx, id)
 	if err != nil {
-		return fmt.Errorf("invoice not found: %w", err)
+		return fmt.Errorf("invoice not found")
 	}
 	if invoice == nil {
 		return fmt.Errorf("invoice not found")
 	}
 
-	// 2. Delete the invoice (cascade will handle items)
+	// 2. Business rule: prevent deletion of paid or partially paid invoices
+	if strings.EqualFold(string(invoice.Status), string(domain.InvoiceStatusPaid)) || invoice.PaidAmount > 0 {
+		invLabel := ""
+		if invoice.InvoiceNumber != nil && *invoice.InvoiceNumber != "" {
+			invLabel = fmt.Sprintf(" (%s)", *invoice.InvoiceNumber)
+		}
+		return fmt.Errorf("cannot delete a paid invoice%s. Please void or cancel it instead", invLabel)
+	}
+
+	// 3. Delete the invoice (repository handles unlinking from sales_orders + cascade)
 	if err := s.invoiceRepo.Delete(ctx, id); err != nil {
 		return fmt.Errorf("failed to delete invoice: %w", err)
 	}
 
-	// 3. Optionally publish InvoiceDeleted event
+	// 4. Optionally publish InvoiceDeleted event
 	// s.publishInvoiceDeleted(invoice)
 
 	return nil
-}
-
-type autoRemoveFileReader struct {
-	*os.File
-	path string
-}
-
-func (r *autoRemoveFileReader) Close() error {
-	err := r.File.Close()
-	os.Remove(r.path)
-	return err
 }
 
 func (s *InvoiceService) GetInvoicePDFStream(ctx context.Context, id uuid.UUID) (io.ReadCloser, string, error) {
@@ -1001,8 +1011,8 @@ func (s *InvoiceService) GetInvoicePDFStream(ctx context.Context, id uuid.UUID) 
 		return nil, "", fmt.Errorf("invoice not found")
 	}
 
-	// 1. If PDFPath is set in DB, try fetching from S3 first
-	if invoice.PDFPath != nil && *invoice.PDFPath != "" && !strings.HasPrefix(*invoice.PDFPath, "/") {
+	// 1. If PDFPath is set in DB and S3 is configured, try fetching from S3 first
+	if s.s3Service != nil && s.s3Service.IsConfigured() && invoice.PDFPath != nil && *invoice.PDFPath != "" && !strings.HasPrefix(*invoice.PDFPath, "/") {
 		stream, contentType, err := s.s3Service.GetFile(*invoice.PDFPath)
 		if err == nil {
 			return stream, contentType, nil
@@ -1010,14 +1020,14 @@ func (s *InvoiceService) GetInvoicePDFStream(ctx context.Context, id uuid.UUID) 
 		fmt.Printf("[WARN] Failed to fetch PDF from S3 (%s): %v. Regenerating locally...\n", *invoice.PDFPath, err)
 	}
 
-	// 2. Generate local PDF file using GetInvoicePDF
+	// 2. Generate local PDF file using GetInvoicePDF (deduplicated via singleflight)
 	localPath, err := s.GetInvoicePDF(ctx, id)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to generate local invoice PDF: %w", err)
 	}
 
-	// 3. Attempt uploading to S3 if s3Service is available
-	if s.s3Service != nil {
+	// 3. Attempt uploading to S3 if s3Service is available and configured
+	if s.s3Service != nil && s.s3Service.IsConfigured() {
 		s3Key := fmt.Sprintf("%s/invoices/%s/%s.pdf", s.s3Service.Config.RootFolder, invoice.OrganizationID.String(), invoice.ID.String())
 		file, errOpen := os.Open(localPath)
 		if errOpen == nil {
@@ -1034,23 +1044,21 @@ func (s *InvoiceService) GetInvoicePDFStream(ctx context.Context, id uuid.UUID) 
 				// Fetch clean stream from S3
 				stream, contentType, errGet := s.s3Service.GetFile(s3Key)
 				if errGet == nil {
-					os.Remove(localPath)
 					return stream, contentType, nil
 				}
 			} else {
-				fmt.Printf("[WARN] Failed to upload PDF to S3: %v. Serving local temp file\n", errUpload)
+				fmt.Printf("[WARN] Failed to upload PDF to S3: %v. Serving local file\n", errUpload)
 			}
 		}
 	}
 
-	// 4. Fallback: serve local temp PDF directly from disk (cleaning up on stream close)
-	tempFile, err := os.Open(localPath)
+	// 4. Fallback: serve local PDF directly from disk (persistent, not deleted)
+	file, err := os.Open(localPath)
 	if err != nil {
-		os.Remove(localPath)
-		return nil, "", fmt.Errorf("failed to open local temp PDF file: %w", err)
+		return nil, "", fmt.Errorf("failed to open local PDF file: %w", err)
 	}
 
-	return &autoRemoveFileReader{File: tempFile, path: localPath}, "application/pdf", nil
+	return file, "application/pdf", nil
 }
 
 func (s *InvoiceService) ListInvoicesByCustomerEmail(ctx context.Context, orgID uuid.UUID, customerEmail string, statusFilter string) ([]dto.InvoiceResponse, error) {
@@ -1137,6 +1145,39 @@ func (s *InvoiceService) ListInvoicesByModule(ctx context.Context, orgID uuid.UU
 	invoices, err := s.invoiceRepo.ListByModule(ctx, orgID, sourceSystem)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list invoices by module: %w", err)
+	}
+
+	responses := make([]*dto.InvoiceResponse, len(invoices))
+	for i, inv := range invoices {
+		responses[i] = s.mapToResponse(ctx, &inv)
+	}
+
+	return responses, nil
+}
+
+func (s *InvoiceService) ListInvoicesWithFilters(ctx context.Context, orgID uuid.UUID, filterParams dto.InvoiceFilterParams) ([]*dto.InvoiceResponse, error) {
+	domainFilter := domain.InvoiceFilter{
+		OrganizationID: orgID,
+		CustomerID:     filterParams.CustomerID,
+		CategoryID:     filterParams.CategoryID,
+		Status:         filterParams.Status,
+		PaymentTerms:   filterParams.PaymentTerms,
+		Search:         filterParams.Search,
+		DueDateStart:   filterParams.DueDateStart,
+		DueDateEnd:     filterParams.DueDateEnd,
+		MinAmount:      filterParams.MinAmount,
+		MaxAmount:      filterParams.MaxAmount,
+		CreatedAtStart: filterParams.CreatedAtStart,
+		CreatedAtEnd:   filterParams.CreatedAtEnd,
+	}
+	if filterParams.Module != nil && *filterParams.Module != "" {
+		sourceSystem := domain.SourceSystem(*filterParams.Module)
+		domainFilter.SourceSystem = &sourceSystem
+	}
+
+	invoices, err := s.invoiceRepo.ListWithFilters(ctx, domainFilter)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list invoices with filters: %w", err)
 	}
 
 	responses := make([]*dto.InvoiceResponse, len(invoices))

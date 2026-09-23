@@ -179,6 +179,41 @@ func (s *PaymentService) ListPaymentsByModule(ctx context.Context, orgID uuid.UU
 	return responses, nil
 }
 
+// ListPaymentsWithFilters returns payments filtered by dto.PaymentFilterParams
+func (s *PaymentService) ListPaymentsWithFilters(ctx context.Context, orgID uuid.UUID, filterParams dto.PaymentFilterParams) ([]*dto.PaymentResponse, error) {
+	domainFilter := domain.PaymentFilter{
+		OrganizationID:   orgID,
+		CustomerID:       filterParams.CustomerID,
+		CustomerName:     filterParams.CustomerName,
+		InvoiceNumber:    filterParams.InvoiceNumber,
+		Status:           filterParams.Status,
+		Method:           filterParams.Method,
+		Search:           filterParams.Search,
+		PaymentDateStart: filterParams.PaymentDateStart,
+		PaymentDateEnd:   filterParams.PaymentDateEnd,
+		MinAmount:        filterParams.MinAmount,
+		MaxAmount:        filterParams.MaxAmount,
+		CreatedAtStart:   filterParams.CreatedAtStart,
+		CreatedAtEnd:     filterParams.CreatedAtEnd,
+	}
+	if filterParams.Module != nil && *filterParams.Module != "" {
+		sourceSystem := domain.SourceSystem(*filterParams.Module)
+		domainFilter.SourceSystem = &sourceSystem
+	}
+
+	payments, err := s.paymentRepo.ListWithFilters(ctx, domainFilter)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list payments with filters: %w", err)
+	}
+
+	responses := make([]*dto.PaymentResponse, len(payments))
+	for i, payment := range payments {
+		responses[i] = s.mapToResponse(ctx, &payment)
+	}
+
+	return responses, nil
+}
+
 // VoidPayment voids an existing payment
 func (s *PaymentService) VoidPayment(ctx context.Context, paymentID uuid.UUID, notes string) error {
 	// 1. Get payment

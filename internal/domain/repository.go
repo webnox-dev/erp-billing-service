@@ -2,9 +2,43 @@ package domain
 
 import (
 	"context"
+	"time"
 
 	"github.com/google/uuid"
 )
+
+type InvoiceFilter struct {
+	OrganizationID uuid.UUID
+	SourceSystem   *SourceSystem
+	CustomerID     *uuid.UUID
+	CategoryID     *uuid.UUID
+	Status         *string
+	PaymentTerms   *string
+	Search         *string
+	DueDateStart   *time.Time
+	DueDateEnd     *time.Time
+	MinAmount      *float64
+	MaxAmount      *float64
+	CreatedAtStart *time.Time
+	CreatedAtEnd   *time.Time
+}
+
+type PaymentFilter struct {
+	OrganizationID   uuid.UUID
+	SourceSystem     *SourceSystem
+	CustomerID       *uuid.UUID
+	CustomerName     *string
+	InvoiceNumber    *string
+	Status           *string
+	Method           *string
+	Search           *string
+	PaymentDateStart *time.Time
+	PaymentDateEnd   *time.Time
+	MinAmount        *float64
+	MaxAmount        *float64
+	CreatedAtStart   *time.Time
+	CreatedAtEnd     *time.Time
+}
 
 type InvoiceRepository interface {
 	Create(ctx context.Context, invoice *Invoice) error
@@ -12,6 +46,8 @@ type InvoiceRepository interface {
 	GetByID(ctx context.Context, id uuid.UUID) (*Invoice, error)
 	List(ctx context.Context, filter map[string]interface{}) ([]Invoice, error)
 	ListByModule(ctx context.Context, orgID uuid.UUID, sourceSystem SourceSystem) ([]Invoice, error)
+	ListWithFilters(ctx context.Context, filter InvoiceFilter) ([]Invoice, error)
+	ListBySalesOrderID(ctx context.Context, salesOrderID uuid.UUID) ([]Invoice, error)
 	Delete(ctx context.Context, id uuid.UUID) error
 	GetNextInvoiceNumber(ctx context.Context, orgID uuid.UUID) (string, error)
 	ClearItems(ctx context.Context, invoiceID uuid.UUID) error
@@ -25,6 +61,7 @@ type PaymentRepository interface {
 	ListByInvoice(ctx context.Context, invoiceID uuid.UUID) ([]Payment, error)
 	List(ctx context.Context) ([]Payment, error)
 	ListByModule(ctx context.Context, orgID uuid.UUID, sourceSystem SourceSystem) ([]Payment, error)
+	ListWithFilters(ctx context.Context, filter PaymentFilter) ([]Payment, error)
 	ListByCustomerIDs(ctx context.Context, orgID uuid.UUID, customerIDs []uuid.UUID) ([]Payment, error)
 }
 

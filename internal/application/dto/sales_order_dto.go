@@ -130,14 +130,21 @@ type SalesOrderResponse struct {
 
 // SalesOrderFilters represents filters for listing sales orders
 type SalesOrderFilters struct {
-	Status       *string    `json:"status,omitempty"`
-	CustomerID   *uuid.UUID `json:"customer_id,omitempty"`
-	CustomerName *string    `json:"customer_name,omitempty"`
-	FromDate     *time.Time `json:"from_date,omitempty"`
-	ToDate       *time.Time `json:"to_date,omitempty"`
-	Search       *string    `json:"search,omitempty"` // Search by order number or customer name
-	Page         int        `json:"page"`
-	PageSize     int        `json:"page_size"`
+	Status         *string    `json:"status,omitempty"`
+	CustomerID     *uuid.UUID `json:"customer_id,omitempty"`
+	CustomerName   *string    `json:"customer_name,omitempty"`
+	ItemName       *string    `json:"item_name,omitempty"`
+	OrderDateStart *time.Time `json:"order_date_start,omitempty"`
+	OrderDateEnd   *time.Time `json:"order_date_end,omitempty"`
+	DueDateStart   *time.Time `json:"due_date_start,omitempty"`
+	DueDateEnd     *time.Time `json:"due_date_end,omitempty"`
+	MinAmount      *float64   `json:"min_amount,omitempty"`
+	MaxAmount      *float64   `json:"max_amount,omitempty"`
+	FromDate       *time.Time `json:"from_date,omitempty"`
+	ToDate         *time.Time `json:"to_date,omitempty"`
+	Search         *string    `json:"search,omitempty"` // Search by order number or customer name
+	Page           int        `json:"page"`
+	PageSize       int        `json:"page_size"`
 }
 
 // MarkAsShippedRequest represents a request to mark an order as shipped

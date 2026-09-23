@@ -44,3 +44,20 @@ type CustomerPaymentHistoryResponse struct {
 	Unpaid        []InvoiceResponse  `json:"unpaid"`
 }
 
+type PaymentFilterParams struct {
+	CustomerID       *uuid.UUID
+	CustomerName     *string
+	InvoiceNumber    *string
+	Status           *string
+	Method           *string
+	Search           *string
+	Module           *string
+	PaymentDateStart *time.Time
+	PaymentDateEnd   *time.Time
+	MinAmount        *float64
+	MaxAmount        *float64
+	CreatedAtStart   *time.Time
+	CreatedAtEnd     *time.Time
+}
+
+
