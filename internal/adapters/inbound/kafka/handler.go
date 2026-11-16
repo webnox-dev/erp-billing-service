@@ -335,26 +335,6 @@ func (h *EventHandler) handleCustomerEvent(tx *gorm.DB, event *shared_events.Bas
 			updates["customer_language"] = payload.CustomerLanguage
 		}
 
-		// Also update the compatibility flat fields in updates
-		if payload.Phone != "" || isUpdated("phone") {
-			updates["phone"] = payload.Phone
-		}
-		if payload.Street1 != "" || isUpdated("street1") {
-			updates["billing_street"] = payload.Street1
-		}
-		if payload.City != "" || isUpdated("city") {
-			updates["billing_city"] = payload.City
-		}
-		if payload.State != "" || isUpdated("state") {
-			updates["billing_state"] = payload.State
-		}
-		if payload.ZipCode != "" || isUpdated("zip_code") {
-			updates["billing_code"] = payload.ZipCode
-		}
-		if payload.Country != "" || isUpdated("country") {
-			updates["billing_country"] = payload.Country
-		}
-
 		if payload.DisplayName != "" || isUpdated("display_name") {
 			updates["display_name"] = payload.DisplayName
 		} else {
