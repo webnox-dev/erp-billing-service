@@ -43,11 +43,9 @@ func main() {
 		log.Fatalf("Failed to run migrations: %v", err)
 	}
 
-	// Initialize subscription validation DB
-	// NOTE: Subscription data is now synced via Kafka (subscription_consumer.go)
-	// The old direct-DB StartSync has been removed in favour of event-driven sync.
+	// Initialize subscription validation DB and background replication fallback alongside Kafka sync.
 	validation.InitDB(db)
-	_ = context.Background() // retained for other usage
+	validation.StartSync(context.Background(), db, "")
 
 	// 4. Initialize Kafka Producer
 	kafkaCfg := shared_kafka.LoadConfigFromEnv()
@@ -97,8 +95,9 @@ func main() {
 		log.Println("Connected to Inventory Service")
 	}
 
-	// 5.7 Initialize Customer Client (HTTP for synchronous fallback)
+	// 5.7 Initialize Customer & Organization Clients (HTTP for synchronous fallback)
 	customerClient := outbound_http.NewCustomerHTTPClient(cfg.CustomerServiceURL)
+	orgClient := outbound_http.NewOrganizationHTTPClient(cfg.OrganizationServiceURL)
 
 	// 5.8 Initialize S3 Service
 	s3Config := &application.S3Config{
@@ -116,7 +115,7 @@ func main() {
 	}
 
 	// 6. Initialize Services
-	invoiceService := application.NewInvoiceService(invoiceRepo, rmRepo, auditRepo, eventPublisher, pdfService, s3Service, inventoryClient, customerClient, salesOrderRepo)
+	invoiceService := application.NewInvoiceService(invoiceRepo, rmRepo, auditRepo, eventPublisher, pdfService, s3Service, inventoryClient, customerClient, orgClient, salesOrderRepo)
 	paymentService := application.NewPaymentService(paymentRepo, invoiceRepo, salesOrderRepo, rmRepo, auditRepo, eventPublisher, customerClient)
 	salesOrderService := application.NewSalesOrderService(salesOrderRepo, invoiceRepo, rmRepo, eventPublisher, inventoryClient, customerClient, pdfService)
 	salesReturnService := application.NewSalesReturnService(salesReturnRepo, salesOrderRepo, invoiceRepo, paymentRepo, rmRepo, eventPublisher, inventoryClient)

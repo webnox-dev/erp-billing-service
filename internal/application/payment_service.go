@@ -111,6 +111,7 @@ func (s *PaymentService) RecordPayment(ctx context.Context, req dto.RecordPaymen
 
 	// 6. Derive new status from payment amounts
 	invoice.Status = invoice.CalculateStatus()
+	invoice.PDFPath = nil // Invalidate cached PDF so next download/preview includes updated payment & transaction ID
 	fmt.Printf("[INFO] Invoice %s status updated: %s -> %s (Remaining Balance: %.2f)\n", invoice.ID, oldStatus, invoice.Status, invoice.BalanceAmount)
 
 	if err := s.invoiceRepo.Update(ctx, invoice); err != nil {
@@ -252,6 +253,7 @@ func (s *PaymentService) VoidPayment(ctx context.Context, paymentID uuid.UUID, n
 
 	// 6. Derive new status
 	invoice.Status = invoice.CalculateStatus()
+	invoice.PDFPath = nil // Invalidate cached PDF so next download/preview reflects voided payment
 
 	if err := s.invoiceRepo.Update(ctx, invoice); err != nil {
 		return fmt.Errorf("failed to update invoice: %w", err)
@@ -407,10 +409,20 @@ func (s *PaymentService) mapInvoiceToResponse(ctx context.Context, inv *domain.I
 
 	customer, err := s.rmRepo.GetCustomer(ctx, inv.CustomerID)
 	if err == nil && customer != nil {
+		phone := customer.Phone
+		if phone == "" {
+			phone = customer.PhoneWork
+		}
+		if phone == "" {
+			phone = customer.PhoneMobile
+		}
 		res.Customer = &dto.CustomerResponse{
 			ID:          customer.ID,
 			DisplayName: customer.DisplayName,
 			CompanyName: customer.CompanyName,
+			Email:       customer.Email,
+			Phone:       phone,
+			TaxNumber:   customer.TaxNumber,
 		}
 	} else {
 		res.Customer = &dto.CustomerResponse{
@@ -428,11 +440,47 @@ func (s *PaymentService) mapInvoiceToResponse(ctx context.Context, inv *domain.I
 	}
 
 	if contact != nil {
+		cPhone := contact.Phone
+		if cPhone == "" {
+			cPhone = contact.Mobile
+		}
 		res.Contact = &dto.ContactResponse{
 			ID:        contact.ID,
 			FirstName: contact.FirstName,
 			LastName:  contact.LastName,
 			Email:     contact.Email,
+			Phone:     cPhone,
+		}
+		if res.Customer != nil {
+			if res.Customer.Email == "" && contact.Email != "" {
+				res.Customer.Email = contact.Email
+			}
+			if res.Customer.Phone == "" && cPhone != "" {
+				res.Customer.Phone = cPhone
+			}
+		}
+	}
+
+	if len(inv.Payments) > 0 {
+		res.Payments = make([]dto.PaymentResponse, 0, len(inv.Payments))
+		for _, p := range inv.Payments {
+			txID := p.Reference
+			if txID == "" {
+				txID = p.ID.String()
+			}
+			res.Payments = append(res.Payments, dto.PaymentResponse{
+				ID:            p.ID.String(),
+				InvoiceID:     p.InvoiceID.String(),
+				Amount:        p.Amount,
+				Method:        string(p.Method),
+				Reference:     p.Reference,
+				TransactionID: txID,
+				PaymentDate:   ConvertToOrgTZValue(ctx, p.PaymentDate, inv.OrganizationID, s.rmRepo),
+				Status:        string(p.Status),
+				Notes:         p.Notes,
+				CreatedAt:     ConvertToOrgTZValue(ctx, p.CreatedAt, inv.OrganizationID, s.rmRepo),
+				UpdatedAt:     ConvertToOrgTZValue(ctx, p.UpdatedAt, inv.OrganizationID, s.rmRepo),
+			})
 		}
 	}
 
@@ -488,17 +536,22 @@ func (s *PaymentService) getCustomer(ctx context.Context, id uuid.UUID) (*domain
 }
 
 func (s *PaymentService) mapToResponse(ctx context.Context, payment *domain.Payment) *dto.PaymentResponse {
+	txID := payment.Reference
+	if txID == "" {
+		txID = payment.ID.String()
+	}
 	resp := &dto.PaymentResponse{
-		ID:          payment.ID.String(),
-		InvoiceID:   payment.InvoiceID.String(),
-		Amount:      payment.Amount,
-		Method:      string(payment.Method),
-		Reference:   payment.Reference,
-		PaymentDate: ConvertToOrgTZValue(ctx, payment.PaymentDate, payment.OrganizationID, s.rmRepo),
-		Status:      string(payment.Status),
-		Notes:       payment.Notes,
-		CreatedAt:   ConvertToOrgTZValue(ctx, payment.CreatedAt, payment.OrganizationID, s.rmRepo),
-		UpdatedAt:   ConvertToOrgTZValue(ctx, payment.UpdatedAt, payment.OrganizationID, s.rmRepo),
+		ID:            payment.ID.String(),
+		InvoiceID:     payment.InvoiceID.String(),
+		Amount:        payment.Amount,
+		Method:        string(payment.Method),
+		Reference:     payment.Reference,
+		TransactionID: txID,
+		PaymentDate:   ConvertToOrgTZValue(ctx, payment.PaymentDate, payment.OrganizationID, s.rmRepo),
+		Status:        string(payment.Status),
+		Notes:         payment.Notes,
+		CreatedAt:     ConvertToOrgTZValue(ctx, payment.CreatedAt, payment.OrganizationID, s.rmRepo),
+		UpdatedAt:     ConvertToOrgTZValue(ctx, payment.UpdatedAt, payment.OrganizationID, s.rmRepo),
 	}
 
 	// Fetch related invoice and customer info to populate InvoiceNumber and CustomerName

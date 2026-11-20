@@ -50,7 +50,7 @@ func (h *EstimateInvoiceHandler) CreateInvoiceFromEstimate(w http.ResponseWriter
 	req.EstimateID = estimateID
 
 	// Create invoice from estimate
-	invoice, err := h.invoiceService.CreateInvoiceFromEstimate(r.Context(), orgID, req)
+	invoice, err := h.invoiceService.CreateInvoiceFromEstimate(withGatewayContext(r), orgID, req)
 	if err != nil {
 		http.Error(w, "failed to create invoice: "+err.Error(), http.StatusInternalServerError)
 		return

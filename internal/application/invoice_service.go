@@ -31,6 +31,7 @@ type InvoiceService struct {
 	s3Service       *S3Service  // Added for S3 integration
 	inventoryClient outbound.InventoryClient
 	customerClient  outbound.CustomerClient
+	orgClient       outbound.OrganizationClient
 	salesOrderRepo  repositories.SalesOrderRepository
 	pdfGroup        singleflight.Group
 }
@@ -44,6 +45,7 @@ func NewInvoiceService(
 	s3Service *S3Service,
 	inventoryClient outbound.InventoryClient,
 	customerClient outbound.CustomerClient,
+	orgClient outbound.OrganizationClient,
 	salesOrderRepo repositories.SalesOrderRepository,
 ) *InvoiceService {
 	return &InvoiceService{
@@ -55,6 +57,7 @@ func NewInvoiceService(
 		s3Service:       s3Service,
 		inventoryClient: inventoryClient,
 		customerClient:  customerClient,
+		orgClient:       orgClient,
 		salesOrderRepo:  salesOrderRepo,
 	}
 }
@@ -82,10 +85,19 @@ func (s *InvoiceService) CreateInvoice(ctx context.Context, orgID uuid.UUID, req
 
 	ownerID := req.OwnerID
 	if ownerID == nil {
+		if userIDStr, ok := ctx.Value("user_id").(string); ok && userIDStr != "" {
+			if parsedUID, err := uuid.Parse(userIDStr); err == nil {
+				ownerID = &parsedUID
+			}
+		}
+	}
+	if ownerID == nil {
 		if adminUUID, err := s.rmRepo.GetOrganizationAdminID(ctx, orgID); err == nil {
 			ownerID = adminUUID
 		}
 	}
+
+	ctxWithOrg := withOrgInContext(ctx, orgID)
 
 	billingAddressID := req.BillingAddressID
 	shippingAddressID := req.ShippingAddressID
@@ -95,7 +107,7 @@ func (s *InvoiceService) CreateInvoice(ctx context.Context, orgID uuid.UUID, req
 
 	var customerRM *domain.CustomerRM
 	if billingAddressID == nil || shippingAddressID == nil || serviceAddressID == nil {
-		if customer, err := s.getCustomer(ctx, req.CustomerID); err == nil && customer != nil {
+		if customer, err := s.getCustomer(ctxWithOrg, req.CustomerID); err == nil && customer != nil {
 			customerRM = customer
 			if billingAddressID == nil {
 				billingAddressID = customer.BillingAddressID
@@ -124,7 +136,7 @@ func (s *InvoiceService) CreateInvoice(ctx context.Context, orgID uuid.UUID, req
 
 	if billingStreet == "" || shippingStreet == "" {
 		if customerRM == nil {
-			if customer, err := s.getCustomer(ctx, req.CustomerID); err == nil && customer != nil {
+			if customer, err := s.getCustomer(ctxWithOrg, req.CustomerID); err == nil && customer != nil {
 				customerRM = customer
 			}
 		}
@@ -375,9 +387,23 @@ func (s *InvoiceService) CreateInvoiceFromEstimate(ctx context.Context, orgID uu
 
 	shippingExplicitlyBlank := req.ShippingStreet == "" && req.ShippingCity == "" && req.ShippingState == "" && req.ShippingCode == "" && req.ShippingCountry == ""
 
+	ctxWithOrg := withOrgInContext(ctx, orgID)
+
+	var ownerID *uuid.UUID
+	if userIDStr, ok := ctx.Value("user_id").(string); ok && userIDStr != "" {
+		if parsedUID, err := uuid.Parse(userIDStr); err == nil {
+			ownerID = &parsedUID
+		}
+	}
+	if ownerID == nil {
+		if adminUUID, err := s.rmRepo.GetOrganizationAdminID(ctx, orgID); err == nil {
+			ownerID = adminUUID
+		}
+	}
+
 	var customerRM *domain.CustomerRM
 	if billingAddressID == nil || shippingAddressID == nil || serviceAddressID == nil {
-		if customer, err := s.getCustomer(ctx, req.CustomerID); err == nil && customer != nil {
+		if customer, err := s.getCustomer(ctxWithOrg, req.CustomerID); err == nil && customer != nil {
 			customerRM = customer
 			if billingAddressID == nil {
 				billingAddressID = customer.BillingAddressID
@@ -405,7 +431,7 @@ func (s *InvoiceService) CreateInvoiceFromEstimate(ctx context.Context, orgID uu
 
 	if billingStreet == "" || shippingStreet == "" {
 		if customerRM == nil {
-			if customer, err := s.getCustomer(ctx, req.CustomerID); err == nil && customer != nil {
+			if customer, err := s.getCustomer(ctxWithOrg, req.CustomerID); err == nil && customer != nil {
 				customerRM = customer
 			}
 		}
@@ -434,6 +460,7 @@ func (s *InvoiceService) CreateInvoiceFromEstimate(ctx context.Context, orgID uu
 		OrganizationID:    orgID,
 		CustomerID:        req.CustomerID,
 		ContactID:         req.ContactID,
+		OwnerID:           ownerID,
 		Subject:           req.Subject,
 		InvoiceNumber:     nil, // Generated on send
 		SourceSystem:      domain.SourceSystemCRM,
@@ -736,45 +763,11 @@ func (s *InvoiceService) SendInvoice(ctx context.Context, id uuid.UUID, req dto.
 	invoice.InvoiceNumber = &invNum
 
 	// 4. Generate PDF
-	customer, err := s.getCustomer(ctx, invoice.CustomerID)
-	if err != nil || customer == nil {
-		fmt.Printf("[WARNING] Customer %s not found for SendInvoice PDF. Using placeholder.\n", invoice.CustomerID)
-		customer = &domain.CustomerRM{
-			ID:              invoice.CustomerID,
-			OrganizationID:  invoice.OrganizationID,
-			DisplayName:     "Customer",
-			CompanyName:     "Customer",
-			BillingStreet:   invoice.BillingStreet,
-			BillingCity:     invoice.BillingCity,
-			BillingState:    invoice.BillingState,
-			BillingCode:     invoice.BillingCode,
-			BillingCountry:  invoice.BillingCountry,
-			ShippingStreet:  invoice.ShippingStreet,
-			ShippingCity:    invoice.ShippingCity,
-			ShippingState:   invoice.ShippingState,
-			ShippingCode:    invoice.ShippingCode,
-			ShippingCountry: invoice.ShippingCountry,
-		}
-	}
-
-	org, err := s.rmRepo.GetOrganization(ctx, invoice.OrganizationID)
-	if err != nil || org == nil {
-		fmt.Printf("[WARNING] Organization %s not found for SendInvoice PDF. Using placeholders: %v\n", invoice.OrganizationID, err)
-		org = &domain.OrganizationRM{
-			ID:               invoice.OrganizationID,
-			OrganizationName: "YOUR COMPANY NAME",
-			Address:          "Your Company Address Line 1",
-			City:             "City",
-			State:            "State",
-			ZipCode:          "ZIP",
-			Country:          "Country",
-			Phone:            "(123) 456-7890",
-			Website:          "www.yourcompany.com",
-		}
-	}
+	customer, org := s.resolveInvoicePartyDetails(ctx, invoice)
+	authorName := s.getAuthorName(ctx, invoice, org)
 
 	wo, appts, techs := s.getFSMDetails(ctx, invoice)
-	pdfPath, err := s.pdfService.GenerateInvoicePDF(ctx, invoice, customer, org, wo, appts, techs)
+	pdfPath, err := s.pdfService.GenerateInvoicePDF(ctx, invoice, customer, org, wo, appts, techs, authorName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate PDF: %w", err)
 	}
@@ -906,55 +899,20 @@ func (s *InvoiceService) generateInvoicePDFInternal(ctx context.Context, id uuid
 	// In production, we might want to check if the PDF is older than the last updated_at
 
 	// 4. Generate PDF (or regenerate for draft invoices)
-	// Get customer for PDF generation
-	customer, err := s.getCustomer(ctx, invoice.CustomerID)
-	if err != nil || customer == nil {
-		fmt.Printf("[WARNING] Customer %s not found for GetInvoicePDF. Using placeholder.\n", invoice.CustomerID)
-		customer = &domain.CustomerRM{
-			ID:              invoice.CustomerID,
-			OrganizationID:  invoice.OrganizationID,
-			DisplayName:     "Customer",
-			CompanyName:     "Customer",
-			BillingStreet:   invoice.BillingStreet,
-			BillingCity:     invoice.BillingCity,
-			BillingState:    invoice.BillingState,
-			BillingCode:     invoice.BillingCode,
-			BillingCountry:  invoice.BillingCountry,
-			ShippingStreet:  invoice.ShippingStreet,
-			ShippingCity:    invoice.ShippingCity,
-			ShippingState:   invoice.ShippingState,
-			ShippingCode:    invoice.ShippingCode,
-			ShippingCountry: invoice.ShippingCountry,
-		}
-	}
-
 	// Generate invoice number if missing (for draft invoices)
 	if invoice.InvoiceNumber == nil {
-		invNum, err := s.invoiceRepo.GetNextInvoiceNumber(ctx, invoice.OrganizationID) // Changed from s.generateInvoiceNumber(ctx)
+		invNum, err := s.invoiceRepo.GetNextInvoiceNumber(ctx, invoice.OrganizationID)
 		if err != nil {
 			return "", fmt.Errorf("failed to generate invoice number: %w", err)
 		}
 		invoice.InvoiceNumber = &invNum
 	}
 
-	org, err := s.rmRepo.GetOrganization(ctx, invoice.OrganizationID)
-	if err != nil || org == nil {
-		fmt.Printf("[WARNING] Organization %s not found for GetInvoicePDF. Using placeholders: %v\n", invoice.OrganizationID, err)
-		org = &domain.OrganizationRM{
-			ID:               invoice.OrganizationID,
-			OrganizationName: "YOUR COMPANY NAME",
-			Address:          "Your Company Address Line 1",
-			City:             "City",
-			State:            "State",
-			ZipCode:          "ZIP",
-			Country:          "Country",
-			Phone:            "(123) 456-7890",
-			Website:          "www.yourcompany.com",
-		}
-	}
+	customer, org := s.resolveInvoicePartyDetails(ctx, invoice)
+	authorName := s.getAuthorName(ctx, invoice, org)
 
 	wo, appts, techs := s.getFSMDetails(ctx, invoice)
-	pdfPath, err := s.pdfService.GenerateInvoicePDF(ctx, invoice, customer, org, wo, appts, techs) // Added ctx
+	pdfPath, err := s.pdfService.GenerateInvoicePDF(ctx, invoice, customer, org, wo, appts, techs, authorName)
 	if err != nil {
 		return "", fmt.Errorf("failed to generate PDF: %w", err)
 	}
@@ -1242,43 +1200,119 @@ func (s *InvoiceService) mapToResponse(ctx context.Context, inv *domain.Invoice)
 		Terms:           inv.Terms,
 	}
 
+	ctxWithOrg := withOrgInContext(ctx, inv.OrganizationID)
+
 	// Fetch Customer details from Read Model or fallback to HTTP client
-	customer, _ := s.getCustomer(ctx, inv.CustomerID)
+	customer, _ := s.getCustomer(ctxWithOrg, inv.CustomerID)
+
+	// Fetch Contact details from Read Model or fallback to HTTP client
+	contact := s.getContactForInvoice(ctxWithOrg, inv)
 
 	if customer != nil {
+		custPhone := customer.Phone
+		if custPhone == "" {
+			custPhone = customer.PhoneWork
+		}
+		if custPhone == "" {
+			custPhone = customer.PhoneMobile
+		}
+		custEmail := customer.Email
+		if custEmail == "" && contact != nil && contact.Email != "" {
+			custEmail = contact.Email
+		}
+		if custPhone == "" && contact != nil {
+			if contact.Phone != "" {
+				custPhone = contact.Phone
+			} else if contact.Mobile != "" {
+				custPhone = contact.Mobile
+			}
+		}
 		res.Customer = &dto.CustomerResponse{
 			ID:          customer.ID,
 			DisplayName: customer.DisplayName,
 			CompanyName: customer.CompanyName,
+			Email:       custEmail,
+			Phone:       custPhone,
+			TaxNumber:   customer.TaxNumber,
 		}
 	} else {
-		// Last resort fallback using stored address if available, or "Generic Customer"
+		// Last resort fallback
+		fallbackName := "Unknown Customer"
+		fallbackEmail := ""
+		fallbackPhone := ""
+		if contact != nil {
+			if contactName := strings.TrimSpace(contact.FirstName + " " + contact.LastName); contactName != "" {
+				fallbackName = contactName
+			}
+			fallbackEmail = contact.Email
+			fallbackPhone = contact.Phone
+			if fallbackPhone == "" {
+				fallbackPhone = contact.Mobile
+			}
+		}
 		res.Customer = &dto.CustomerResponse{
 			ID:          inv.CustomerID,
-			DisplayName: "Unknown Customer",
-			CompanyName: "Unknown Customer",
+			DisplayName: fallbackName,
+			CompanyName: fallbackName,
+			Email:       fallbackEmail,
+			Phone:       fallbackPhone,
 		}
-	}
-
-	// Fetch Contact details from Read Model or fallback to HTTP client
-	var contact *domain.ContactRM
-	if inv.ContactID != nil {
-		contact, _ = s.rmRepo.GetContact(ctx, *inv.ContactID)
-		if contact == nil && s.customerClient != nil {
-			fmt.Printf("[INFO] Contact %s not found in ReadModel, fetching from Customer Service\n", *inv.ContactID)
-			contact, _ = s.customerClient.GetContact(ctx, *inv.ContactID)
-		}
-	} else {
-		// FALLBACK: If no contact associated with invoice, try to fetch primary contact of the customer
-		contact, _ = s.rmRepo.GetPrimaryContact(ctx, inv.CustomerID)
 	}
 
 	if contact != nil {
+		cPhone := contact.Phone
+		if cPhone == "" {
+			cPhone = contact.Mobile
+		}
 		res.Contact = &dto.ContactResponse{
 			ID:        contact.ID,
 			FirstName: contact.FirstName,
 			LastName:  contact.LastName,
 			Email:     contact.Email,
+			Phone:     cPhone,
+		}
+	}
+
+	if org, err := s.getOrganization(ctx, inv.OrganizationID); err == nil && org != nil && org.OrganizationName != "" {
+		res.Organization = &dto.OrganizationResponse{
+			ID:               org.ID,
+			OrganizationName: org.OrganizationName,
+			Address:          org.Address,
+			City:             org.City,
+			State:            org.State,
+			ZipCode:          org.ZipCode,
+			Country:          org.Country,
+			Phone:            org.Phone,
+			Email:            org.Email,
+			Website:          org.Website,
+			GSTIN:            org.GSTIN,
+			IconURL:          org.IconURL,
+		}
+		res.AuthorName = s.getAuthorName(ctx, inv, org)
+	} else {
+		res.AuthorName = s.getAuthorName(ctx, inv, nil)
+	}
+
+	if len(inv.Payments) > 0 {
+		res.Payments = make([]dto.PaymentResponse, 0, len(inv.Payments))
+		for _, p := range inv.Payments {
+			txID := p.Reference
+			if txID == "" {
+				txID = p.ID.String()
+			}
+			res.Payments = append(res.Payments, dto.PaymentResponse{
+				ID:            p.ID.String(),
+				InvoiceID:     p.InvoiceID.String(),
+				Amount:        p.Amount,
+				Method:        string(p.Method),
+				Reference:     p.Reference,
+				TransactionID: txID,
+				PaymentDate:   ConvertToOrgTZValue(ctx, p.PaymentDate, inv.OrganizationID, s.rmRepo),
+				Status:        string(p.Status),
+				Notes:         p.Notes,
+				CreatedAt:     ConvertToOrgTZValue(ctx, p.CreatedAt, inv.OrganizationID, s.rmRepo),
+				UpdatedAt:     ConvertToOrgTZValue(ctx, p.UpdatedAt, inv.OrganizationID, s.rmRepo),
+			})
 		}
 	}
 
@@ -1314,6 +1348,19 @@ func (s *InvoiceService) mapToResponse(ctx context.Context, inv *domain.Invoice)
 	return res
 }
 
+func withOrgInContext(ctx context.Context, orgID uuid.UUID) context.Context {
+	if orgID == uuid.Nil {
+		return ctx
+	}
+	if existing, ok := ctx.Value("organization_id").(string); ok && existing != "" {
+		return ctx
+	}
+	if existing, ok := ctx.Value("organization_id").(uuid.UUID); ok && existing != uuid.Nil {
+		return ctx
+	}
+	return context.WithValue(ctx, "organization_id", orgID.String())
+}
+
 func (s *InvoiceService) getCustomer(ctx context.Context, id uuid.UUID) (*domain.CustomerRM, error) {
 	customer, err := s.rmRepo.GetCustomer(ctx, id)
 	if (err != nil || customer == nil || customer.DisplayName == "") && s.customerClient != nil {
@@ -1322,8 +1369,175 @@ func (s *InvoiceService) getCustomer(ctx context.Context, id uuid.UUID) (*domain
 		if remoteErr == nil && remoteCustomer != nil {
 			return remoteCustomer, nil
 		}
+		if remoteErr != nil {
+			fmt.Printf("[WARNING] Failed to fetch customer %s from Customer Service: %v\n", id, remoteErr)
+		}
 	}
 	return customer, err
+}
+
+func (s *InvoiceService) getContactForInvoice(ctx context.Context, inv *domain.Invoice) *domain.ContactRM {
+	var contact *domain.ContactRM
+	if inv.ContactID != nil {
+		contact, _ = s.rmRepo.GetContact(ctx, *inv.ContactID)
+		if contact == nil && s.customerClient != nil {
+			fmt.Printf("[INFO] Contact %s not found in ReadModel, fetching from Customer Service\n", *inv.ContactID)
+			contact, _ = s.customerClient.GetContact(ctx, *inv.ContactID)
+		}
+	} else {
+		contact, _ = s.rmRepo.GetPrimaryContact(ctx, inv.CustomerID)
+	}
+	return contact
+}
+
+func (s *InvoiceService) getOrganization(ctx context.Context, orgID uuid.UUID) (*domain.OrganizationRM, error) {
+	org, err := s.rmRepo.GetOrganization(ctx, orgID)
+	if (err != nil || org == nil || org.OrganizationName == "") && s.orgClient != nil && orgID != uuid.Nil {
+		fmt.Printf("[INFO] Organization %s missing in ReadModel, fetching from Organization Service\n", orgID)
+		remoteOrg, remoteErr := s.orgClient.GetOrganization(withOrgInContext(ctx, orgID), orgID)
+		if remoteErr == nil && remoteOrg != nil && remoteOrg.OrganizationName != "" {
+			if org != nil {
+				if remoteOrg.IconURL == "" {
+					remoteOrg.IconURL = org.IconURL
+				}
+				if remoteOrg.Email == "" {
+					remoteOrg.Email = org.Email
+				}
+			}
+			return remoteOrg, nil
+		}
+		if remoteErr != nil {
+			fmt.Printf("[WARNING] Failed to fetch organization %s from Organization Service: %v\n", orgID, remoteErr)
+		}
+	}
+	return org, err
+}
+
+func (s *InvoiceService) getAuthorName(ctx context.Context, invoice *domain.Invoice, org *domain.OrganizationRM) string {
+	if invoice.OwnerID != nil && *invoice.OwnerID != uuid.Nil {
+		if user, err := s.rmRepo.GetUserByID(ctx, invoice.OwnerID.String()); err == nil && user != nil {
+			if name := strings.TrimSpace(user.FullName); name != "" {
+				return name
+			}
+			if name := strings.TrimSpace(user.FirstName + " " + user.LastName); name != "" {
+				return name
+			}
+			if user.Email != "" {
+				return user.Email
+			}
+		}
+	}
+	if adminID, err := s.rmRepo.GetOrganizationAdminID(ctx, invoice.OrganizationID); err == nil && adminID != nil {
+		if user, err := s.rmRepo.GetUserByID(ctx, adminID.String()); err == nil && user != nil {
+			if name := strings.TrimSpace(user.FullName); name != "" {
+				return name
+			}
+			if name := strings.TrimSpace(user.FirstName + " " + user.LastName); name != "" {
+				return name
+			}
+			if user.Email != "" {
+				return user.Email
+			}
+		}
+	}
+	if org != nil && org.OrganizationName != "" && org.OrganizationName != "YOUR COMPANY NAME" {
+		return org.OrganizationName
+	}
+	return ""
+}
+
+func (s *InvoiceService) resolveInvoicePartyDetails(ctx context.Context, invoice *domain.Invoice) (*domain.CustomerRM, *domain.OrganizationRM) {
+	ctxWithOrg := withOrgInContext(ctx, invoice.OrganizationID)
+
+	customer, err := s.getCustomer(ctxWithOrg, invoice.CustomerID)
+	contact := s.getContactForInvoice(ctxWithOrg, invoice)
+
+	if err != nil || customer == nil {
+		fmt.Printf("[WARNING] Customer %s not found for invoice PDF. Using fallback.\n", invoice.CustomerID)
+		fallbackName := "Customer"
+		if contact != nil {
+			if contactName := strings.TrimSpace(contact.FirstName + " " + contact.LastName); contactName != "" {
+				fallbackName = contactName
+			}
+		}
+		customer = &domain.CustomerRM{
+			ID:              invoice.CustomerID,
+			OrganizationID:  invoice.OrganizationID,
+			DisplayName:     fallbackName,
+			CompanyName:     fallbackName,
+			BillingStreet:   invoice.BillingStreet,
+			BillingCity:     invoice.BillingCity,
+			BillingState:    invoice.BillingState,
+			BillingCode:     invoice.BillingCode,
+			BillingCountry:  invoice.BillingCountry,
+			ShippingStreet:  invoice.ShippingStreet,
+			ShippingCity:    invoice.ShippingCity,
+			ShippingState:   invoice.ShippingState,
+			ShippingCode:    invoice.ShippingCode,
+			ShippingCountry: invoice.ShippingCountry,
+		}
+	}
+
+	if customer.DisplayName == "" {
+		if customer.CompanyName != "" {
+			customer.DisplayName = customer.CompanyName
+		} else if name := strings.TrimSpace(customer.FirstName + " " + customer.LastName); name != "" {
+			customer.DisplayName = name
+		}
+	}
+	if customer.Phone == "" {
+		if customer.PhoneWork != "" {
+			customer.Phone = customer.PhoneWork
+		} else if customer.PhoneMobile != "" {
+			customer.Phone = customer.PhoneMobile
+		}
+	}
+	if contact != nil {
+		if customer.Email == "" && contact.Email != "" {
+			customer.Email = contact.Email
+		}
+		if customer.Phone == "" {
+			if contact.Phone != "" {
+				customer.Phone = contact.Phone
+			} else if contact.Mobile != "" {
+				customer.Phone = contact.Mobile
+			}
+		}
+	}
+
+	// Ensure invoice address fields are populated from customer addresses if missing on the invoice struct
+	if invoice.BillingStreet == "" && customer.BillingStreet != "" {
+		invoice.BillingStreet = customer.BillingStreet
+		invoice.BillingCity = customer.BillingCity
+		invoice.BillingState = customer.BillingState
+		invoice.BillingCode = customer.BillingCode
+		invoice.BillingCountry = customer.BillingCountry
+	}
+	if invoice.ShippingStreet == "" && customer.ShippingStreet != "" && invoice.SourceSystem != domain.SourceSystemFSM && invoice.SourceSystem != domain.SourceSystemCRM {
+		invoice.ShippingStreet = customer.ShippingStreet
+		invoice.ShippingCity = customer.ShippingCity
+		invoice.ShippingState = customer.ShippingState
+		invoice.ShippingCode = customer.ShippingCode
+		invoice.ShippingCountry = customer.ShippingCountry
+	}
+
+	org, err := s.getOrganization(ctxWithOrg, invoice.OrganizationID)
+	if err != nil || org == nil {
+		fmt.Printf("[WARNING] Organization %s not found for invoice PDF. Using placeholders: %v\n", invoice.OrganizationID, err)
+		org = &domain.OrganizationRM{
+			ID:               invoice.OrganizationID,
+			OrganizationName: "YOUR COMPANY NAME",
+			Address:          "Your Company Address Line 1",
+			City:             "City",
+			State:            "State",
+			ZipCode:          "ZIP",
+			Country:          "Country",
+			Phone:            "(123) 456-7890",
+			Website:          "www.yourcompany.com",
+		}
+	}
+
+	return customer, org
 }
 
 func (s *InvoiceService) UpdateStatus(ctx context.Context, id uuid.UUID, newStatus domain.InvoiceStatus, notes string, performedBy string) error {

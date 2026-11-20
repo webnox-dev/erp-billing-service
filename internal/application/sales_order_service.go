@@ -455,11 +455,17 @@ func (s *SalesOrderService) CreateInvoiceFromOrder(orderID uuid.UUID) (*dto.Invo
 		}
 	}
 
+	var ownerID *uuid.UUID
+	if adminUUID, err := s.rmRepo.GetOrganizationAdminID(context.Background(), salesOrder.OrganizationID); err == nil {
+		ownerID = adminUUID
+	}
+
 	invoice := &domain.Invoice{
 		ID:             uuid.New(),
 		OrganizationID: salesOrder.OrganizationID,
 		CustomerID:     salesOrder.CustomerID,
 		ContactID:      salesOrder.ContactID,
+		OwnerID:        ownerID,
 		Subject:        invoiceSubject,
 		SourceSystem:   domain.SourceSystemInventory,
 		SalesOrderID:   &salesOrder.ID,

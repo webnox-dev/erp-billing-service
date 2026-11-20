@@ -74,6 +74,7 @@ type ReadModelRepository interface {
 	GetPrimaryContact(ctx context.Context, customerID uuid.UUID) (*ContactRM, error)
 	SearchContacts(ctx context.Context, orgID uuid.UUID, customerID uuid.UUID, query string) ([]ContactRM, error)
 	GetOrganization(ctx context.Context, id uuid.UUID) (*OrganizationRM, error)
+	GetUserByID(ctx context.Context, userID string) (*UserReadOnly, error)
 	SearchWorkOrders(ctx context.Context, orgID uuid.UUID, query string) ([]WorkOrderRM, error)
 	GetWorkOrderByID(ctx context.Context, id uuid.UUID) (*WorkOrderRM, error)
 	GetOrganizationAdminID(ctx context.Context, orgID uuid.UUID) (*uuid.UUID, error)

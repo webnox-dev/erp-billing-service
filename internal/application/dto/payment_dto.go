@@ -25,6 +25,7 @@ type PaymentResponse struct {
 	Amount        float64   `json:"amount"`
 	Method        string    `json:"method"`
 	Reference     string    `json:"reference"`
+	TransactionID string    `json:"transaction_id,omitempty"`
 	PaymentDate   time.Time `json:"payment_date"`
 	Status        string    `json:"status"`
 	Notes         string    `json:"notes"`

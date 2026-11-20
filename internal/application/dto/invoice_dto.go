@@ -98,9 +98,12 @@ type InvoiceResponse struct {
 	// PDF path - populated when invoice is sent
 	PDFPath *string `json:"pdf_path,omitempty"`
 
-	Customer        *CustomerResponse `json:"customer,omitempty"`
-	Contact         *ContactResponse  `json:"contact,omitempty"`
-	Items           []ItemResponse    `json:"items,omitempty"`
+	Customer        *CustomerResponse     `json:"customer,omitempty"`
+	Contact         *ContactResponse      `json:"contact,omitempty"`
+	Organization    *OrganizationResponse `json:"organization,omitempty"`
+	AuthorName      string                `json:"author_name,omitempty"`
+	Items           []ItemResponse        `json:"items,omitempty"`
+	Payments        []PaymentResponse     `json:"payments,omitempty"`
 	Notes           string            `json:"notes"`
 	Terms           string            `json:"terms"`
 	BillingStreet   string            `json:"billing_street"`
@@ -122,6 +125,9 @@ type CustomerResponse struct {
 	ID          uuid.UUID `json:"id"`
 	DisplayName string    `json:"display_name"`
 	CompanyName string    `json:"company_name"`
+	Email       string    `json:"email,omitempty"`
+	Phone       string    `json:"phone,omitempty"`
+	TaxNumber   string    `json:"tax_number,omitempty"`
 }
 
 type ContactResponse struct {
@@ -129,6 +135,22 @@ type ContactResponse struct {
 	FirstName string    `json:"first_name"`
 	LastName  string    `json:"last_name"`
 	Email     string    `json:"email"`
+	Phone     string    `json:"phone,omitempty"`
+}
+
+type OrganizationResponse struct {
+	ID               uuid.UUID `json:"id"`
+	OrganizationName string    `json:"organization_name"`
+	Address          string    `json:"address,omitempty"`
+	City             string    `json:"city,omitempty"`
+	State            string    `json:"state,omitempty"`
+	ZipCode          string    `json:"zip_code,omitempty"`
+	Country          string    `json:"country,omitempty"`
+	Phone            string    `json:"phone,omitempty"`
+	Email            string    `json:"email,omitempty"`
+	Website          string    `json:"website,omitempty"`
+	GSTIN            string    `json:"gstin,omitempty"`
+	IconURL          string    `json:"icon_url,omitempty"`
 }
 
 type ItemResponse struct {

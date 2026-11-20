@@ -37,6 +37,7 @@ func (s *PDFService) GenerateInvoicePDF(
 	workOrder *domain.WorkOrderRM,
 	appointments []domain.ServiceAppointmentRM,
 	technicians []domain.UserReadOnly,
+	authorName string,
 ) (string, error) {
 	orgDir := filepath.Join(s.storageBasePath, invoice.OrganizationID.String())
 	if err := os.MkdirAll(orgDir, 0755); err != nil {
@@ -273,6 +274,11 @@ func (s *PDFService) GenerateInvoicePDF(
 	if contactStr != "" {
 		pdf.SetXY(leftX, currentY)
 		pdf.Cell(100, 4, contactStr)
+		currentY += 4
+	}
+	if organization != nil && organization.GSTIN != "" {
+		pdf.SetXY(leftX, currentY)
+		pdf.Cell(100, 4, "GSTIN: "+organization.GSTIN)
 	}
 
 	// 4. Zoho-Style 2-Column Metadata Box (Grid)
@@ -366,10 +372,15 @@ func (s *PDFService) GenerateInvoicePDF(
 
 	var addressCols []addressCol
 
+	custDisplayName := "Customer"
+	if customer != nil && customer.DisplayName != "" {
+		custDisplayName = customer.DisplayName
+	}
+
 	if invoice.BillingStreet != "" || invoice.BillingCity != "" {
 		addressCols = append(addressCols, addressCol{
 			label:   "BILLING ADDRESS",
-			name:    customer.DisplayName,
+			name:    custDisplayName,
 			street:  invoice.BillingStreet,
 			city:    invoice.BillingCity,
 			state:   invoice.BillingState,
@@ -381,7 +392,7 @@ func (s *PDFService) GenerateInvoicePDF(
 	if invoice.ServiceStreet != "" || invoice.ServiceCity != "" {
 		addressCols = append(addressCols, addressCol{
 			label:   "SERVICE ADDRESS",
-			name:    customer.DisplayName,
+			name:    custDisplayName,
 			street:  invoice.ServiceStreet,
 			city:    invoice.ServiceCity,
 			state:   invoice.ServiceState,
@@ -402,7 +413,7 @@ func (s *PDFService) GenerateInvoicePDF(
 		if !isDuplicate {
 			addressCols = append(addressCols, addressCol{
 				label:   "SHIPPING ADDRESS",
-				name:    customer.DisplayName,
+				name:    custDisplayName,
 				street:  invoice.ShippingStreet,
 				city:    invoice.ShippingCity,
 				state:   invoice.ShippingState,
@@ -482,9 +493,9 @@ func (s *PDFService) GenerateInvoicePDF(
 	}
 
 	// Calculate total height of combined card
-	cardHeight := 4.0 + custHeight + 3.0 // Top padding + customer height + separator spacing
+	cardHeight := 4.0 + custHeight // Top padding + customer height
 	if len(addressCols) > 0 {
-		cardHeight += 3.0 + addrCardHeight // spacing + address height
+		cardHeight += 3.0 + 3.0 + addrCardHeight // separator spacing + address height
 	}
 	cardHeight += 4.0 // Bottom padding
 
@@ -561,9 +572,11 @@ func (s *PDFService) GenerateInvoicePDF(
 
 	// 2. Draw horizontal separator line between customer details and address details
 	sepY := cardStartY + 4.0 + custHeight + 2.0
-	pdf.SetDrawColor(lineR, lineG, lineB)
-	pdf.SetLineWidth(0.15)
-	pdf.Line(18.0, sepY, 192.0, sepY)
+	if len(addressCols) > 0 {
+		pdf.SetDrawColor(lineR, lineG, lineB)
+		pdf.SetLineWidth(0.15)
+		pdf.Line(18.0, sepY, 192.0, sepY)
+	}
 
 	// 3. Render Address Details (side-by-side columns)
 	if len(addressCols) > 0 {
@@ -603,7 +616,7 @@ func (s *PDFService) GenerateInvoicePDF(
 
 		pdf.SetY(addrStartY + addrCardHeight + 6.0)
 	} else {
-		pdf.SetY(pdf.GetY() + 4)
+		pdf.SetY(cardStartY + cardHeight + 6.0)
 	}
 
 	// 1. Service Details Section (merged Work Order and Appointment details)
@@ -1181,6 +1194,16 @@ func (s *PDFService) GenerateInvoicePDF(
 	pdf.SetFont("Arial", "B", 10)
 	pdf.Cell(40, 8, "Total")
 	pdf.CellFormat(valWidth - 40, 8, fmt.Sprintf("%s%.2f", currencySymbol, invoice.TotalAmount), "T", 1, "R", false, 0, "")
+
+	if invoice.PaidAmount > 0 {
+		pdf.SetX(labelX)
+		pdf.SetFont("Arial", "B", 9)
+		pdf.SetTextColor(22, 163, 74)
+		pdf.Cell(40, 6, "Amount Paid")
+		pdf.CellFormat(valWidth - 40, 6, fmt.Sprintf("-%s%.2f", currencySymbol, invoice.PaidAmount), "", 1, "R", false, 0, "")
+		pdf.SetTextColor(textDarkR, textDarkG, textDarkB)
+		pdf.SetFont("Arial", "B", 10)
+	}
 	
 	// Balance Due banner with Navy solid fill and White text
 	pdf.SetX(labelX)
@@ -1188,11 +1211,74 @@ func (s *PDFService) GenerateInvoicePDF(
 	pdf.SetTextColor(255, 255, 255)
 	
 	balanceDue := invoice.TotalAmount - invoice.PaidAmount
+	if balanceDue < 0 {
+		balanceDue = 0
+	}
 	pdf.CellFormat(40, 8, "  Balance Due", "", 0, "L", true, 0, "")
 	pdf.CellFormat(valWidth - 40, 8, fmt.Sprintf("%s%.2f  ", currencySymbol, balanceDue), "", 1, "R", true, 0, "")
 	
 	pdf.SetTextColor(textDarkR, textDarkG, textDarkB)
 	pdf.SetFont("Arial", "", 8.5)
+
+	// 5.5 Payment & Transaction Details Section
+	var activePayments []domain.Payment
+	for _, p := range invoice.Payments {
+		if p.DeletedAt == nil && p.Status != domain.PaymentStatusVoid {
+			activePayments = append(activePayments, p)
+		}
+	}
+	if len(activePayments) > 0 {
+		checkPageBreak(22.0 + float64(len(activePayments))*7.0)
+		pdf.SetY(pdf.GetY() + 6)
+		pdf.SetFont("Arial", "B", 10)
+		pdf.SetTextColor(primaryR, primaryG, primaryB)
+		pdf.Cell(0, 6, "PAYMENT DETAILS")
+		pdf.Ln(7)
+
+		pdf.SetFont("Arial", "B", 8)
+		pdf.SetFillColor(primaryR, primaryG, primaryB)
+		pdf.SetTextColor(255, 255, 255)
+		pdf.SetDrawColor(lineR, lineG, lineB)
+
+		pdf.CellFormat(8, 7, "#", "1", 0, "C", true, 0, "")
+		pdf.CellFormat(26, 7, "Date", "1", 0, "L", true, 0, "")
+		pdf.CellFormat(26, 7, "Method", "1", 0, "L", true, 0, "")
+		pdf.CellFormat(70, 7, "Transaction ID", "1", 0, "L", true, 0, "")
+		pdf.CellFormat(22, 7, "Status", "1", 0, "C", true, 0, "")
+		pdf.CellFormat(28, 7, "Amount", "1", 1, "R", true, 0, "")
+
+		pdf.SetTextColor(textDarkR, textDarkG, textDarkB)
+		pdf.SetFont("Arial", "", 8.5)
+
+		for i, p := range activePayments {
+			checkPageBreak(8.0)
+			fill := i%2 == 1
+			if fill {
+				pdf.SetFillColor(bgLightR, bgLightG, bgLightB)
+			}
+
+			txID := strings.TrimSpace(p.Reference)
+			if txID == "" {
+				txID = p.ID.String()
+			}
+			methodStr := strings.ToUpper(string(p.Method))
+			if methodStr == "" {
+				methodStr = "N/A"
+			}
+			statusStr := strings.ToUpper(string(p.Status))
+			if statusStr == "" {
+				statusStr = "COMPLETED"
+			}
+
+			pdf.CellFormat(8, 6.5, fmt.Sprintf("%d", i+1), "1", 0, "C", fill, 0, "")
+			pdf.CellFormat(26, 6.5, p.PaymentDate.Format("02/01/2006"), "1", 0, "L", fill, 0, "")
+			pdf.CellFormat(26, 6.5, methodStr, "1", 0, "L", fill, 0, "")
+			pdf.CellFormat(70, 6.5, txID, "1", 0, "L", fill, 0, "")
+			pdf.CellFormat(22, 6.5, statusStr, "1", 0, "C", fill, 0, "")
+			pdf.CellFormat(28, 6.5, fmt.Sprintf("%s%.2f", currencySymbol, p.Amount), "1", 1, "R", fill, 0, "")
+		}
+		pdf.Ln(4)
+	}
 
 	// 6. Notes & Signature Sections
 	trimmedNotes := strings.TrimSpace(invoice.Notes)
@@ -1225,11 +1311,23 @@ func (s *PDFService) GenerateInvoicePDF(
 		pdf.MultiCell(180, 4, trimmedTerms, "", "L", false)
 	}
 
-	checkPageBreak(25.0)
-	pdf.SetY(-35)
+	if pdf.GetY() > 245.0 {
+		pdf.AddPage()
+	}
+	pdf.SetY(-42)
+	trimmedAuthor := strings.TrimSpace(authorName)
+	if trimmedAuthor != "" {
+		pdf.SetX(125)
+		pdf.SetFont("Times", "BI", 13)
+		pdf.SetTextColor(primaryR, primaryG, primaryB)
+		pdf.CellFormat(70, 7, trimmedAuthor, "", 1, "C", false, 0, "")
+	} else {
+		pdf.Ln(7)
+	}
 	pdf.SetX(125)
 	pdf.SetFont("Arial", "B", 9)
 	pdf.SetTextColor(primaryR, primaryG, primaryB)
+	pdf.SetDrawColor(lineR, lineG, lineB)
 	pdf.CellFormat(70, 5, "Authorized Signature", "T", 1, "C", false, 0, "")
 
 	tempPdfPath := filepath.Join(orgDir, fmt.Sprintf("%s_%d.tmp", invoice.ID.String(), time.Now().UnixNano()))

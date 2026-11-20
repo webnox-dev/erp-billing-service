@@ -21,6 +21,7 @@ type Config struct {
 	InventoryServiceURL     string
 	InventoryServiceHTTPURL string
 	CustomerServiceURL      string
+	OrganizationServiceURL  string
 	S3BucketName            string
 	S3Region                string
 	S3AccessKey             string
@@ -54,7 +55,8 @@ func Load() (*Config, error) {
 		RefreshTokenExpiry:      refreshTokenExpiry,
 		InventoryServiceURL:     getEnv("INVENTORY_SERVICE_URL", "serviceandparts-service:50057"),
 		InventoryServiceHTTPURL: getEnv("INVENTORY_SERVICE_HTTP_URL", "http://serviceandparts-service:8087"),
-		CustomerServiceURL:      getEnv("CUSTOMER_SERVICE_URL", "http://customer-service:8084"),
+		CustomerServiceURL:      getEnv("CUSTOMER_SERVICE_URL", "http://efs-customer-service:8084"),
+		OrganizationServiceURL:  getEnv("ORGANIZATION_SERVICE_URL", "http://efs-organization-service:8082"),
 		S3BucketName:            getEnv("S3_BUCKET_NAME", "webnox"),
 		S3Region:                getEnv("S3_REGION", "blr1"),
 		S3AccessKey:             getEnv("S3_ACCESS_KEY", ""),

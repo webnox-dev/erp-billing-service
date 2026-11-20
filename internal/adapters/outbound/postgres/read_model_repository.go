@@ -208,6 +208,14 @@ func (r *ReadModelRepository) GetOrganization(ctx context.Context, id uuid.UUID)
 	return &rm, nil
 }
 
+func (r *ReadModelRepository) GetUserByID(ctx context.Context, userID string) (*domain.UserReadOnly, error) {
+	var user domain.UserReadOnly
+	if err := r.db.WithContext(ctx).First(&user, "id = ?", userID).Error; err != nil {
+		return nil, err
+	}
+	return &user, nil
+}
+
 func (r *ReadModelRepository) SearchWorkOrders(ctx context.Context, orgID uuid.UUID, query string) ([]domain.WorkOrderRM, error) {
 	var res []domain.WorkOrderRM
 	db := r.db.WithContext(ctx).

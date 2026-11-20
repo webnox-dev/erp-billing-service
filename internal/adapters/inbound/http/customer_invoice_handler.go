@@ -82,7 +82,7 @@ func (h *CustomerInvoiceHandler) GetCustomerInvoice(w http.ResponseWriter, r *ht
 		return
 	}
 
-	invoice, err := h.invoiceService.GetCustomerInvoice(r.Context(), id, customerEmail)
+	invoice, err := h.invoiceService.GetCustomerInvoice(withGatewayContext(r), id, customerEmail)
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "unauthorized") {
 			http.Error(w, err.Error(), http.StatusNotFound)
@@ -228,7 +228,7 @@ func (h *CustomerInvoiceHandler) DownloadCustomerInvoicePDF(w http.ResponseWrite
 	}
 
 	// Verify the invoice belongs to the customer
-	_, err = h.invoiceService.GetCustomerInvoice(r.Context(), id, customerEmail)
+	_, err = h.invoiceService.GetCustomerInvoice(withGatewayContext(r), id, customerEmail)
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "unauthorized") {
 			http.Error(w, "invoice not found", http.StatusNotFound)
@@ -238,7 +238,7 @@ func (h *CustomerInvoiceHandler) DownloadCustomerInvoicePDF(w http.ResponseWrite
 		return
 	}
 
-	reader, contentType, err := h.invoiceService.GetInvoicePDFStream(r.Context(), id)
+	reader, contentType, err := h.invoiceService.GetInvoicePDFStream(withGatewayContext(r), id)
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") {
 			http.Error(w, err.Error(), http.StatusNotFound)

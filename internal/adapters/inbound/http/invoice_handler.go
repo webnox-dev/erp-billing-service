@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -25,6 +26,20 @@ func NewInvoiceHandler(service *application.InvoiceService) *InvoiceHandler {
 	return &InvoiceHandler{service: service}
 }
 
+func withGatewayContext(r *http.Request) context.Context {
+	ctx := r.Context()
+	if auth := r.Header.Get("Authorization"); auth != "" {
+		ctx = context.WithValue(ctx, "authorization", auth)
+	}
+	if orgID := r.Header.Get("X-Organization-ID"); orgID != "" {
+		ctx = context.WithValue(ctx, "organization_id", orgID)
+	}
+	if userID := r.Header.Get("X-User-ID"); userID != "" {
+		ctx = context.WithValue(ctx, "user_id", userID)
+	}
+	return ctx
+}
+
 func (h *InvoiceHandler) CreateInvoice(w http.ResponseWriter, r *http.Request) {
 	var req dto.CreateInvoiceRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -43,7 +58,7 @@ func (h *InvoiceHandler) CreateInvoice(w http.ResponseWriter, r *http.Request) {
 	}
 
 	fmt.Printf("[DEBUG] Creating invoice with orgID: %s, request: %+v\n", orgID, req)
-	invoice, err := h.service.CreateInvoice(r.Context(), orgID, req)
+	invoice, err := h.service.CreateInvoice(withGatewayContext(r), orgID, req)
 	if err != nil {
 		fmt.Printf("[ERROR] Failed to create invoice: %v\n", err)
 		// Check if it's a validation error (stock unavailable, etc.)
@@ -77,7 +92,7 @@ func (h *InvoiceHandler) UpdateInvoice(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Assuming UpdateInvoice logic in service returns updated invoice or error
-	invoice, err := h.service.UpdateInvoice(r.Context(), id, req)
+	invoice, err := h.service.UpdateInvoice(withGatewayContext(r), id, req)
 	if err != nil {
 		if err.Error() == "invoice not found" {
 			http.Error(w, err.Error(), http.StatusNotFound)
@@ -199,7 +214,7 @@ func (h *InvoiceHandler) ListInvoices(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	result, err := h.service.ListInvoicesWithFilters(r.Context(), orgID, filterParams)
+	result, err := h.service.ListInvoicesWithFilters(withGatewayContext(r), orgID, filterParams)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -215,7 +230,7 @@ func (h *InvoiceHandler) GetInvoice(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	id, _ := uuid.Parse(vars["id"])
 
-	invoice, err := h.service.GetInvoice(r.Context(), id)
+	invoice, err := h.service.GetInvoice(withGatewayContext(r), id)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
@@ -319,7 +334,7 @@ func (h *InvoiceHandler) SendInvoice(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	invoice, err := h.service.SendInvoice(r.Context(), id, req)
+	invoice, err := h.service.SendInvoice(withGatewayContext(r), id, req)
 	if err != nil {
 		// Check for specific error types
 		if err.Error() == "invoice not found" {
@@ -353,7 +368,7 @@ func (h *InvoiceHandler) DownloadInvoicePDF(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	reader, contentType, err := h.service.GetInvoicePDFStream(r.Context(), id)
+	reader, contentType, err := h.service.GetInvoicePDFStream(withGatewayContext(r), id)
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") {
 			http.Error(w, err.Error(), http.StatusNotFound)
@@ -386,7 +401,7 @@ func (h *InvoiceHandler) PreviewInvoicePDF(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	reader, contentType, err := h.service.GetInvoicePDFStream(r.Context(), id)
+	reader, contentType, err := h.service.GetInvoicePDFStream(withGatewayContext(r), id)
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") {
 			http.Error(w, err.Error(), http.StatusNotFound)
