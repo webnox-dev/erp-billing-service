@@ -160,6 +160,15 @@ func (h *SubscriptionEventHandler) handleOrgSubscribed(ctx context.Context, raw 
 	log.Printf("[BillingSubConsumer] Upserted org subscription %s for org %s (status=%s)",
 		payload.SubscriptionID, payload.OrganizationID, payload.Status)
 
+	// Mark prior active/trial subscriptions for the same org as expired when a new active subscription arrives
+	statusLower := strings.ToLower(strings.TrimSpace(payload.Status))
+	if statusLower == "active" || statusLower == "trial" || statusLower == "paid" || statusLower == "unpaid" {
+		h.db.WithContext(ctx).Exec(
+			`UPDATE organization_subscriptions_readonly SET status = 'expired' WHERE organization_id = ? AND id <> ? AND LOWER(status) IN ('active','trial','paid','unpaid')`,
+			payload.OrganizationID, payload.SubscriptionID,
+		)
+	}
+
 	// Sync organization_subscription_items_readonly (Table 4)
 	// Each item represents one module's (efs/crm/ims) plan assignment within the subscription.
 	if len(payload.Items) > 0 {

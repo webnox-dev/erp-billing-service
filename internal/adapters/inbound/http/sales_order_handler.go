@@ -38,6 +38,13 @@ func (h *SalesOrderHandler) CreateSalesOrder(w http.ResponseWriter, r *http.Requ
 	orgIDStr := r.Header.Get("X-Organization-ID")
 	orgID, _ := uuid.Parse(orgIDStr)
 	req.OrganizationID = orgID
+	if strings.TrimSpace(req.Module) == "" {
+		if modHeader := strings.TrimSpace(r.Header.Get("X-Module")); modHeader != "" {
+			req.Module = modHeader
+		} else if modQuery := strings.TrimSpace(r.URL.Query().Get("module")); modQuery != "" {
+			req.Module = modQuery
+		}
+	}
 
 	order, err := h.service.CreateSalesOrder(&req)
 	if err != nil {

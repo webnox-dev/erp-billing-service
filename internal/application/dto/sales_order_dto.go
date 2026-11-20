@@ -34,6 +34,7 @@ type CreateSalesOrderRequest struct {
 	SalesCommission   float64             `json:"sales_commission"`
 	Terms             string              `json:"terms"`
 	Notes             string              `json:"notes"`
+	Module            string              `json:"module,omitempty"`
 }
 
 // UpdateSalesOrderRequest represents a request to update a sales order

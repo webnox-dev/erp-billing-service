@@ -55,7 +55,7 @@ func (s *SalesOrderService) CreateSalesOrder(req *dto.CreateSalesOrderRequest) (
 	subClient := validation.NewSubscriptionClient()
 	if subClient != nil && req.OrganizationID != uuid.Nil {
 		orgIDStr := req.OrganizationID.String()
-		allowed, msg, err := subClient.ValidateRestriction(orgIDStr, validation.RestrictionKeyMaxSalesOrders)
+		allowed, msg, err := subClient.ValidateRestriction(orgIDStr, validation.RestrictionKeyMaxSalesOrders, req.Module)
 		if err != nil {
 			log.Printf("[Subscription] Validation error for org %s: %v — allowing (fail-open)", orgIDStr, err)
 		} else if !allowed {

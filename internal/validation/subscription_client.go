@@ -58,6 +58,33 @@ func (c *SubscriptionClient) ValidateRestriction(orgID, restrictionKey string, o
 	return allowed, msg, err
 }
 
+func normalizeBillingModule(optionalModules []string) string {
+	for _, m := range optionalModules {
+		switch strings.ToLower(strings.TrimSpace(m)) {
+		case "crm":
+			return "crm"
+		case "ims", "inventory":
+			return "ims"
+		case "efs", "fsm", "billing":
+			return "efs"
+		}
+	}
+	return ""
+}
+
+func formatBillingModuleLabel(moduleSlug string) string {
+	switch strings.ToLower(strings.TrimSpace(moduleSlug)) {
+	case "crm":
+		return "CRM"
+	case "ims":
+		return "IMS"
+	case "efs":
+		return "EFS"
+	default:
+		return ""
+	}
+}
+
 func resolveDefaultBillingPlanIDs(db *gorm.DB, restrictionKey, targetModule string) []string {
 	var planIDs []string
 	discriminator := "max_vendors"
@@ -81,6 +108,63 @@ func resolveDefaultBillingPlanIDs(db *gorm.DB, restrictionKey, targetModule stri
 	return planIDs
 }
 
+func resolveActiveBillingPlanIDs(db *gorm.DB, subID, subPlanID, restrictionKey, targetModule string) ([]string, string) {
+	if targetModule != "" {
+		var modItem struct{ PlanID string }
+		if errMod := db.Table("organization_subscription_items_readonly").
+			Where("subscription_id = ? AND LOWER(module_slug) = ?", subID, targetModule).
+			Select("plan_id").
+			Scan(&modItem).Error; errMod == nil && modItem.PlanID != "" {
+			return []string{modItem.PlanID}, targetModule
+		}
+
+		// Multi-module subscription without an item for targetModule must use that module's default plan
+		// instead of inheriting another module's plan limits.
+		var itemCount int64
+		db.Table("organization_subscription_items_readonly").
+			Where("subscription_id = ?", subID).
+			Count(&itemCount)
+		if itemCount > 0 {
+			return resolveDefaultBillingPlanIDs(db, restrictionKey, targetModule), targetModule
+		}
+		if subPlanID != "" {
+			return []string{subPlanID}, targetModule
+		}
+		return nil, targetModule
+	}
+
+	effectiveModule := ""
+	var planIDs []string
+	if imsRestrictionKeys[restrictionKey] {
+		var imsItem struct{ PlanID string }
+		if errIMS := db.Table("organization_subscription_items_readonly").
+			Where("subscription_id = ? AND LOWER(module_slug) = ?", subID, "ims").
+			Select("plan_id").
+			Scan(&imsItem).Error; errIMS == nil && imsItem.PlanID != "" {
+			planIDs = append(planIDs, imsItem.PlanID)
+			effectiveModule = "ims"
+		}
+	}
+
+	if len(planIDs) == 0 {
+		if subPlanID != "" {
+			planIDs = append(planIDs, subPlanID)
+		}
+		var itemPlanIDs []string
+		db.Table("organization_subscription_items_readonly").
+			Where("subscription_id = ?", subID).
+			Pluck("plan_id", &itemPlanIDs)
+
+		for _, pid := range itemPlanIDs {
+			if pid != "" {
+				planIDs = append(planIDs, pid)
+			}
+		}
+	}
+
+	return planIDs, effectiveModule
+}
+
 // ValidateRestrictionDetailed checks restriction with full details
 // Returns (allowed, message, limit, currentValue, error)
 func (c *SubscriptionClient) ValidateRestrictionDetailed(orgID, restrictionKey string, optionalModules ...string) (bool, string, int, int, error) {
@@ -88,14 +172,7 @@ func (c *SubscriptionClient) ValidateRestrictionDetailed(orgID, restrictionKey s
 		return true, "no db connection — allowed (fail-open)", -1, 0, nil
 	}
 
-	targetModule := ""
-	for _, m := range optionalModules {
-		lower := strings.ToLower(strings.TrimSpace(m))
-		if lower == "crm" || lower == "efs" || lower == "ims" {
-			targetModule = lower
-			break
-		}
-	}
+	targetModule := normalizeBillingModule(optionalModules)
 
 	// 1. Get active subscription from organization_subscriptions_readonly
 	var sub struct {
@@ -122,42 +199,11 @@ func (c *SubscriptionClient) ValidateRestrictionDetailed(orgID, restrictionKey s
 
 	// 2. Resolve plan_ids with module isolation when specified or inferred
 	var planIDs []string
+	effectiveModule := targetModule
 	if isExpired {
 		planIDs = resolveDefaultBillingPlanIDs(c.db, restrictionKey, targetModule)
 	} else {
-		if targetModule != "" {
-			var modItem struct{ PlanID string }
-			if errMod := c.db.Table("organization_subscription_items_readonly").
-				Where("subscription_id = ? AND module_slug = ?", sub.ID, targetModule).
-				Select("plan_id").
-				Scan(&modItem).Error; errMod == nil && modItem.PlanID != "" {
-				planIDs = append(planIDs, modItem.PlanID)
-			}
-		} else if imsRestrictionKeys[restrictionKey] {
-			var imsItem struct{ PlanID string }
-			if errIMS := c.db.Table("organization_subscription_items_readonly").
-				Where("subscription_id = ? AND module_slug = ?", sub.ID, "ims").
-				Select("plan_id").
-				Scan(&imsItem).Error; errIMS == nil && imsItem.PlanID != "" {
-				planIDs = append(planIDs, imsItem.PlanID)
-			}
-		}
-
-		if len(planIDs) == 0 {
-			if sub.PlanID != "" {
-				planIDs = append(planIDs, sub.PlanID)
-			}
-			var itemPlanIDs []string
-			c.db.Table("organization_subscription_items_readonly").
-				Where("subscription_id = ?", sub.ID).
-				Pluck("plan_id", &itemPlanIDs)
-
-			for _, pid := range itemPlanIDs {
-				if pid != "" {
-					planIDs = append(planIDs, pid)
-				}
-			}
-		}
+		planIDs, effectiveModule = resolveActiveBillingPlanIDs(c.db, sub.ID, sub.PlanID, restrictionKey, targetModule)
 	}
 
 	if len(planIDs) == 0 {
@@ -221,17 +267,26 @@ func (c *SubscriptionClient) ValidateRestrictionDetailed(orgID, restrictionKey s
 	allowed := currentValue < limitValue
 	msg := fmt.Sprintf("Usage: %d / %d", currentValue, limitValue)
 	if !allowed {
-		switch restrictionKey {
-		case RestrictionKeyMaxSalesOrders:
-			msg = fmt.Sprintf("Sales order creation limit reached (%d/%d) under your purchased IMS plan. Please upgrade your subscription to create more sales orders.", currentValue, limitValue)
-		case RestrictionKeyMaxSalesReturns:
-			msg = fmt.Sprintf("Sales return creation limit reached (%d/%d) under your purchased IMS plan. Please upgrade your subscription to create more sales returns.", currentValue, limitValue)
-		default:
-			msg = fmt.Sprintf("(%d/%d). Please upgrade your subscription.", currentValue, limitValue)
-		}
+		msg = formatBillingRestrictionMessage(restrictionKey, effectiveModule, currentValue, limitValue)
 	}
 
 	return allowed, msg, limitValue, currentValue, nil
+}
+
+func formatBillingRestrictionMessage(restrictionKey, effectiveModule string, currentValue, limitValue int) string {
+	moduleLabel := formatBillingModuleLabel(effectiveModule)
+	planPhrase := "your purchased plan"
+	if moduleLabel != "" {
+		planPhrase = fmt.Sprintf("your purchased %s plan", moduleLabel)
+	}
+	switch restrictionKey {
+	case RestrictionKeyMaxSalesOrders:
+		return fmt.Sprintf("Sales order creation limit reached (%d/%d) under %s. Please upgrade your subscription to create more sales orders.", currentValue, limitValue, planPhrase)
+	case RestrictionKeyMaxSalesReturns:
+		return fmt.Sprintf("Sales return creation limit reached (%d/%d) under %s. Please upgrade your subscription to create more sales returns.", currentValue, limitValue, planPhrase)
+	default:
+		return fmt.Sprintf("(%d/%d). Please upgrade your subscription.", currentValue, limitValue)
+	}
 }
 
 // IncrementUsage is a local no-op since usage is calculated dynamically via DB COUNT
