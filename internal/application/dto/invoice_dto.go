@@ -81,11 +81,23 @@ type InvoiceResponse struct {
 	ExciseDuty      float64    `json:"excise_duty"`
 	SalesCommission float64    `json:"sales_commission"`
 	SalesOrder      string     `json:"sales_order"`
+	SalesOrderID    *uuid.UUID `json:"sales_order_id,omitempty"`
 	PurchaseOrder   string     `json:"purchase_order"`
 	PaymentTerms    string     `json:"payment_terms"`
 	Currency        string     `json:"currency"`
 	ServiceCategoryID *uuid.UUID `json:"service_category_id,omitempty"`
 	PartCategoryID    *uuid.UUID `json:"part_category_id,omitempty"`
+	ParentInvoiceID     *uuid.UUID               `json:"parent_invoice_id,omitempty"`
+	ParentInvoiceNumber *string                  `json:"parent_invoice_number,omitempty"`
+	IsPartialInvoice    bool                     `json:"is_partial_invoice"`
+	ActualAmount        float64                  `json:"actual_amount,omitempty"`
+	PreviousPaidAmount  float64                  `json:"previous_paid_amount,omitempty"`
+	ActualDiscountTotal float64                  `json:"actual_discount_total,omitempty"`
+	ActualTaxTotal      float64                  `json:"actual_tax_total,omitempty"`
+	ActualAdjustment    float64                  `json:"actual_adjustment,omitempty"`
+	OrderBalanceAmount  float64                  `json:"order_balance_amount,omitempty"`
+	PreviousPayments    []PaymentResponse        `json:"previous_payments,omitempty"`
+	ChildInvoices       []InvoiceSummaryResponse `json:"child_invoices,omitempty"`
 	OwnerID         *uuid.UUID `json:"owner_id"`
 	CustomerID         uuid.UUID  `json:"customer_id"`
 	ContactID          *uuid.UUID `json:"contact_id"`
@@ -151,6 +163,29 @@ type OrganizationResponse struct {
 	Website          string    `json:"website,omitempty"`
 	GSTIN            string    `json:"gstin,omitempty"`
 	IconURL          string    `json:"icon_url,omitempty"`
+}
+
+type InvoiceSummaryResponse struct {
+	ID                  uuid.UUID  `json:"id"`
+	InvoiceNumber       *string    `json:"invoice_number,omitempty"`
+	Status              string     `json:"status"`
+	IsPartialInvoice    bool       `json:"is_partial_invoice"`
+	ParentInvoiceID     *uuid.UUID `json:"parent_invoice_id,omitempty"`
+	ParentInvoiceNumber *string    `json:"parent_invoice_number,omitempty"`
+	ActualAmount        float64    `json:"actual_amount,omitempty"`
+	PreviousPaidAmount  float64    `json:"previous_paid_amount,omitempty"`
+	SubTotal            float64    `json:"sub_total"`
+	DiscountTotal       float64    `json:"discount_total"`
+	TaxTotal            float64    `json:"tax_total"`
+	Adjustment          float64    `json:"adjustment"`
+	TotalAmount         float64    `json:"total_amount"`
+	PaidAmount          float64    `json:"paid_amount"`
+	BalanceAmount       float64    `json:"balance_amount"`
+	OrderBalanceAmount  float64    `json:"order_balance_amount,omitempty"`
+	Method              string     `json:"method,omitempty"`
+	TransactionID       string     `json:"transaction_id,omitempty"`
+	InvoiceDate         time.Time  `json:"invoice_date"`
+	CreatedAt           time.Time  `json:"created_at"`
 }
 
 type ItemResponse struct {

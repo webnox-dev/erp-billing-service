@@ -18,19 +18,23 @@ type RecordPaymentRequest struct {
 
 // PaymentResponse represents a payment response
 type PaymentResponse struct {
-	ID            string    `json:"id"`
-	InvoiceID     string    `json:"invoice_id"`
-	InvoiceNumber string    `json:"invoice_number,omitempty"`
-	CustomerName  string    `json:"customer_name,omitempty"`
-	Amount        float64   `json:"amount"`
-	Method        string    `json:"method"`
-	Reference     string    `json:"reference"`
-	TransactionID string    `json:"transaction_id,omitempty"`
-	PaymentDate   time.Time `json:"payment_date"`
-	Status        string    `json:"status"`
-	Notes         string    `json:"notes"`
-	CreatedAt     time.Time `json:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	ID                   string     `json:"id"`
+	InvoiceID            string     `json:"invoice_id"`
+	InvoiceNumber        string     `json:"invoice_number,omitempty"`
+	PartialInvoiceID     *string    `json:"partial_invoice_id,omitempty"`
+	PartialInvoiceNumber string     `json:"partial_invoice_number,omitempty"`
+	SalesOrderID         *uuid.UUID `json:"sales_order_id,omitempty"`
+	SalesOrder           string     `json:"sales_order,omitempty"`
+	CustomerName         string     `json:"customer_name,omitempty"`
+	Amount               float64    `json:"amount"`
+	Method               string     `json:"method"`
+	Reference            string     `json:"reference"`
+	TransactionID        string     `json:"transaction_id,omitempty"`
+	PaymentDate          time.Time  `json:"payment_date"`
+	Status               string     `json:"status"`
+	Notes                string     `json:"notes"`
+	CreatedAt            time.Time  `json:"created_at"`
+	UpdatedAt            time.Time  `json:"updated_at"`
 }
 
 // VoidPaymentRequest represents a request to void a payment

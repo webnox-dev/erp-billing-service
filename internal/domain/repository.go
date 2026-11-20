@@ -48,6 +48,7 @@ type InvoiceRepository interface {
 	ListByModule(ctx context.Context, orgID uuid.UUID, sourceSystem SourceSystem) ([]Invoice, error)
 	ListWithFilters(ctx context.Context, filter InvoiceFilter) ([]Invoice, error)
 	ListBySalesOrderID(ctx context.Context, salesOrderID uuid.UUID) ([]Invoice, error)
+	ListByParentInvoiceID(ctx context.Context, parentInvoiceID uuid.UUID) ([]Invoice, error)
 	Delete(ctx context.Context, id uuid.UUID) error
 	GetNextInvoiceNumber(ctx context.Context, orgID uuid.UUID) (string, error)
 	ClearItems(ctx context.Context, invoiceID uuid.UUID) error

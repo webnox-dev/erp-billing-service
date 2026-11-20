@@ -226,10 +226,14 @@ func (s *PDFService) GenerateInvoicePDF(
 	pdf.SetTextColor(primaryR, primaryG, primaryB)
 	pdf.Cell(120.0-leftX, 6, organization.OrganizationName)
 
-	// TAX INVOICE label – always top-right regardless of logo
-	pdf.SetXY(120, 15)
+	// TAX INVOICE / PARTIAL INVOICE label – always top-right regardless of logo
+	pdf.SetXY(110, 15)
 	pdf.SetFont("Arial", "B", 20)
-	pdf.CellFormat(75, 6, "INVOICE", "", 1, "R", false, 0, "")
+	headerTitle := "INVOICE"
+	if invoice.IsPartialInvoice {
+		headerTitle = "PARTIAL INVOICE"
+	}
+	pdf.CellFormat(85, 6, headerTitle, "", 1, "R", false, 0, "")
 	
 	pdf.SetX(leftX)
 	pdf.SetFont("Arial", "", 8.5)
@@ -282,7 +286,8 @@ func (s *PDFService) GenerateInvoicePDF(
 	}
 
 	// 4. Zoho-Style 2-Column Metadata Box (Grid)
-	hasThirdRow := invoice.SalesOrder != "" || invoice.PurchaseOrder != "" || invoice.ReferenceNo != ""
+	hasParentRef := invoice.ParentInvoiceNumber != nil && *invoice.ParentInvoiceNumber != ""
+	hasThirdRow := hasParentRef || invoice.SalesOrder != "" || invoice.PurchaseOrder != "" || invoice.ReferenceNo != ""
 	boxHeight := 13.0
 	if hasThirdRow {
 		boxHeight = 18.0
@@ -333,7 +338,23 @@ func (s *PDFService) GenerateInvoicePDF(
 	if hasThirdRow {
 		pdf.Ln(5)
 		pdf.SetX(20)
-		if invoice.SalesOrder != "" || invoice.PurchaseOrder != "" {
+		if hasParentRef {
+			pdf.SetTextColor(textMutedR, textMutedG, textMutedB)
+			pdf.SetFont("Arial", "B", 9)
+			pdf.Cell(30, 5, "Order Invoice")
+			pdf.SetTextColor(textDarkR, textDarkG, textDarkB)
+			pdf.SetFont("Arial", "", 9)
+			pdf.Cell(60, 5, ": "+*invoice.ParentInvoiceNumber)
+
+			if invoice.SalesOrder != "" {
+				pdf.SetTextColor(textMutedR, textMutedG, textMutedB)
+				pdf.SetFont("Arial", "B", 9)
+				pdf.Cell(30, 5, "Sales Order")
+				pdf.SetTextColor(textDarkR, textDarkG, textDarkB)
+				pdf.SetFont("Arial", "", 9)
+				pdf.Cell(0, 5, ": "+invoice.SalesOrder)
+			}
+		} else if invoice.SalesOrder != "" || invoice.PurchaseOrder != "" {
 			pdf.SetTextColor(textMutedR, textMutedG, textMutedB)
 			pdf.SetFont("Arial", "B", 9)
 			label := "Sales Order"
@@ -345,14 +366,14 @@ func (s *PDFService) GenerateInvoicePDF(
 			pdf.Cell(30, 5, label)
 			pdf.SetTextColor(textDarkR, textDarkG, textDarkB)
 			pdf.SetFont("Arial", "", 9)
-			pdf.Cell(60, 5, ": " + value)
+			pdf.Cell(60, 5, ": "+value)
 		} else if invoice.ReferenceNo != "" {
 			pdf.SetTextColor(textMutedR, textMutedG, textMutedB)
 			pdf.SetFont("Arial", "B", 9)
 			pdf.Cell(30, 5, "Reference No")
 			pdf.SetTextColor(textDarkR, textDarkG, textDarkB)
 			pdf.SetFont("Arial", "", 9)
-			pdf.Cell(60, 5, ": " + invoice.ReferenceNo)
+			pdf.Cell(60, 5, ": "+invoice.ReferenceNo)
 		}
 	}
 	
@@ -1209,24 +1230,184 @@ func (s *PDFService) GenerateInvoicePDF(
 	pdf.SetX(labelX)
 	pdf.SetFillColor(primaryR, primaryG, primaryB)
 	pdf.SetTextColor(255, 255, 255)
-	
+
+	balanceLabel := "  Balance Due"
 	balanceDue := invoice.TotalAmount - invoice.PaidAmount
+	if invoice.IsPartialInvoice {
+		balanceLabel = "  Order Balance Due"
+		balanceDue = invoice.OrderBalanceAmount
+	}
 	if balanceDue < 0 {
 		balanceDue = 0
 	}
-	pdf.CellFormat(40, 8, "  Balance Due", "", 0, "L", true, 0, "")
-	pdf.CellFormat(valWidth - 40, 8, fmt.Sprintf("%s%.2f  ", currencySymbol, balanceDue), "", 1, "R", true, 0, "")
-	
+	pdf.CellFormat(40, 8, balanceLabel, "", 0, "L", true, 0, "")
+	pdf.CellFormat(valWidth-40, 8, fmt.Sprintf("%s%.2f  ", currencySymbol, balanceDue), "", 1, "R", true, 0, "")
+
 	pdf.SetTextColor(textDarkR, textDarkG, textDarkB)
 	pdf.SetFont("Arial", "", 8.5)
 
-	// 5.5 Payment & Transaction Details Section
+	// 5.4 Partial Payment Breakdown Section (when partial invoice or partially paid status)
 	var activePayments []domain.Payment
 	for _, p := range invoice.Payments {
 		if p.DeletedAt == nil && p.Status != domain.PaymentStatusVoid {
 			activePayments = append(activePayments, p)
 		}
 	}
+
+	if invoice.IsPartialInvoice || invoice.Status == domain.InvoiceStatusPartial {
+		actualTotal := invoice.TotalAmount
+		if invoice.IsPartialInvoice && invoice.ActualAmount > 0 {
+			actualTotal = invoice.ActualAmount
+		}
+		actualDiscount := invoice.DiscountTotal
+		actualTax := invoice.TaxTotal
+		actualAdj := invoice.Adjustment
+		if invoice.IsPartialInvoice {
+			actualDiscount = invoice.ActualDiscountTotal
+			actualTax = invoice.ActualTaxTotal
+			actualAdj = invoice.ActualAdjustment
+		}
+
+		paidNow := invoice.PaidAmount
+		prevPaid := invoice.PreviousPaidAmount
+		if !invoice.IsPartialInvoice && len(activePayments) > 1 {
+			prevSum := 0.0
+			for i := 0; i < len(activePayments)-1; i++ {
+				prevSum += activePayments[i].Amount
+			}
+			prevPaid = prevSum
+		}
+
+		var gstOnPaid, discountOnPaid, adjOnPaid, taxableOnPaid float64
+		if invoice.IsPartialInvoice {
+			gstOnPaid = invoice.TaxTotal
+			discountOnPaid = invoice.DiscountTotal
+			adjOnPaid = invoice.Adjustment
+			taxableOnPaid = invoice.SubTotal - invoice.DiscountTotal
+		} else {
+			ratio := 0.0
+			if actualTotal > 0 {
+				ratio = paidNow / actualTotal
+			}
+			gstOnPaid = actualTax * ratio
+			discountOnPaid = actualDiscount * ratio
+			adjOnPaid = actualAdj * ratio
+			taxableOnPaid = (invoice.SubTotal - invoice.DiscountTotal) * ratio
+		}
+		gstPct := 0.0
+		if taxableOnPaid > 0 {
+			gstPct = (gstOnPaid / taxableOnPaid) * 100.0
+		}
+
+		methodStr := "N/A"
+		txIDStr := "N/A"
+		if len(activePayments) > 0 {
+			latest := activePayments[len(activePayments)-1]
+			if m := strings.TrimSpace(string(latest.Method)); m != "" {
+				methodStr = strings.ToUpper(m)
+			}
+			txIDStr = strings.TrimSpace(latest.Reference)
+			if txIDStr == "" {
+				txIDStr = latest.ID.String()
+			}
+		}
+
+		checkPageBreak(68.0)
+		pdf.SetY(pdf.GetY() + 6)
+		pdf.SetFont("Arial", "B", 10)
+		pdf.SetTextColor(primaryR, primaryG, primaryB)
+		pdf.Cell(0, 6, "PARTIAL PAYMENT BREAKDOWN")
+		pdf.Ln(7)
+
+		pdf.SetFont("Arial", "B", 8)
+		pdf.SetFillColor(primaryR, primaryG, primaryB)
+		pdf.SetTextColor(255, 255, 255)
+		pdf.SetDrawColor(lineR, lineG, lineB)
+		pdf.CellFormat(75, 7, "Breakdown Component", "1", 0, "L", true, 0, "")
+		pdf.CellFormat(105, 7, "Details / Amount", "1", 1, "R", true, 0, "")
+
+		type bdRow struct {
+			label string
+			value string
+		}
+		bdRows := []bdRow{
+			{"Actual Amount (Order Total)", fmt.Sprintf("%s%.2f", currencySymbol, actualTotal)},
+			{"Previous Paid Amount", fmt.Sprintf("%s%.2f", currencySymbol, prevPaid)},
+			{"Paid Amount (Current Payment)", fmt.Sprintf("%s%.2f", currencySymbol, paidNow)},
+			{"GST Calculation for Paid Amount", fmt.Sprintf("+%s%.2f (%.2f%% on Taxable %s%.2f | Order GST: %s%.2f)", currencySymbol, gstOnPaid, gstPct, currencySymbol, taxableOnPaid, currencySymbol, actualTax)},
+			{"Discount (Paid Share)", fmt.Sprintf("-%s%.2f (Order Discount: %s%.2f)", currencySymbol, discountOnPaid, currencySymbol, actualDiscount)},
+			{"Adjustment (Paid Share)", fmt.Sprintf("%s%.2f (Order Adjustment: %s%.2f)", currencySymbol, adjOnPaid, currencySymbol, actualAdj)},
+			{"Method of Payment", methodStr},
+			{"Transaction ID", txIDStr},
+			{"Remaining Order Balance", fmt.Sprintf("%s%.2f", currencySymbol, balanceDue)},
+		}
+
+		pdf.SetTextColor(textDarkR, textDarkG, textDarkB)
+		for i, r := range bdRows {
+			checkPageBreak(7.0)
+			fill := i%2 == 1
+			if fill {
+				pdf.SetFillColor(bgLightR, bgLightG, bgLightB)
+			}
+			pdf.SetFont("Arial", "B", 8)
+			pdf.CellFormat(75, 6.5, " "+r.label, "1", 0, "L", fill, 0, "")
+			pdf.SetFont("Arial", "", 8)
+			pdf.CellFormat(105, 6.5, r.value+" ", "1", 1, "R", fill, 0, "")
+		}
+		pdf.Ln(2)
+	}
+
+	// 5.4b Details of Previously Paid Amounts (when prior payments exist)
+	if len(invoice.PreviousPayments) > 0 {
+		checkPageBreak(22.0 + float64(len(invoice.PreviousPayments))*7.0)
+		pdf.SetY(pdf.GetY() + 4)
+		pdf.SetFont("Arial", "B", 10)
+		pdf.SetTextColor(primaryR, primaryG, primaryB)
+		pdf.Cell(0, 6, "PREVIOUS PAID DETAILS")
+		pdf.Ln(7)
+
+		pdf.SetFont("Arial", "B", 8)
+		pdf.SetFillColor(primaryR, primaryG, primaryB)
+		pdf.SetTextColor(255, 255, 255)
+		pdf.SetDrawColor(lineR, lineG, lineB)
+		pdf.CellFormat(8, 7, "#", "1", 0, "C", true, 0, "")
+		pdf.CellFormat(24, 7, "Date", "1", 0, "L", true, 0, "")
+		pdf.CellFormat(34, 7, "Partial Inv #", "1", 0, "L", true, 0, "")
+		pdf.CellFormat(22, 7, "Method", "1", 0, "L", true, 0, "")
+		pdf.CellFormat(64, 7, "Transaction ID", "1", 0, "L", true, 0, "")
+		pdf.CellFormat(28, 7, "Paid Amount", "1", 1, "R", true, 0, "")
+
+		pdf.SetTextColor(textDarkR, textDarkG, textDarkB)
+		pdf.SetFont("Arial", "", 8)
+		for i, p := range invoice.PreviousPayments {
+			checkPageBreak(7.0)
+			fill := i%2 == 1
+			if fill {
+				pdf.SetFillColor(bgLightR, bgLightG, bgLightB)
+			}
+			txID := strings.TrimSpace(p.Reference)
+			if txID == "" {
+				txID = p.ID.String()
+			}
+			pInvNum := "-"
+			if p.PartialInvoiceNumber != nil && *p.PartialInvoiceNumber != "" {
+				pInvNum = *p.PartialInvoiceNumber
+			}
+			methodStr := strings.ToUpper(strings.TrimSpace(string(p.Method)))
+			if methodStr == "" {
+				methodStr = "N/A"
+			}
+			pdf.CellFormat(8, 6.5, fmt.Sprintf("%d", i+1), "1", 0, "C", fill, 0, "")
+			pdf.CellFormat(24, 6.5, p.PaymentDate.Format("02/01/2006"), "1", 0, "L", fill, 0, "")
+			pdf.CellFormat(34, 6.5, pInvNum, "1", 0, "L", fill, 0, "")
+			pdf.CellFormat(22, 6.5, methodStr, "1", 0, "L", fill, 0, "")
+			pdf.CellFormat(64, 6.5, txID, "1", 0, "L", fill, 0, "")
+			pdf.CellFormat(28, 6.5, fmt.Sprintf("%s%.2f", currencySymbol, p.Amount), "1", 1, "R", fill, 0, "")
+		}
+		pdf.Ln(2)
+	}
+
+	// 5.5 Payment & Transaction Details Section
 	if len(activePayments) > 0 {
 		checkPageBreak(22.0 + float64(len(activePayments))*7.0)
 		pdf.SetY(pdf.GetY() + 6)

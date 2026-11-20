@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math"
 	"time"
 
 	"erp-billing-service/internal/application/dto"
@@ -47,6 +48,172 @@ func NewPaymentService(
 	}
 }
 
+func roundCurrency(v float64) float64 {
+	return math.Round(v*100) / 100
+}
+
+// BuildPartialPaymentInvoice constructs a distinct partial payment invoice with a proportional
+// financial breakdown (SubTotal, Discount, GST/Tax, Adjustment, Excise) linked to the parent order/invoice.
+func BuildPartialPaymentInvoice(
+	parent *domain.Invoice,
+	paymentDate time.Time,
+	invoiceNumber string,
+	paidAmt float64,
+	prevPaid float64,
+	priorPartials []domain.Invoice,
+	resolvedSalesOrder string,
+) *domain.Invoice {
+	partialID := uuid.New()
+	now := time.Now().UTC()
+	paidAmt = roundCurrency(paidAmt)
+	prevPaid = roundCurrency(prevPaid)
+
+	var subTotal, discountTotal, taxTotal, adjustment, exciseDuty, tdsAmt, tcsAmt float64
+	isFinalInstallment := len(priorPartials) > 0 && (prevPaid+paidAmt >= parent.TotalAmount-0.01)
+
+	if isFinalInstallment {
+		var usedSub, usedDisc, usedTax, usedAdj, usedExc, usedTDS, usedTCS float64
+		for _, p := range priorPartials {
+			if p.Status == domain.InvoiceStatusVoid || p.Status == domain.InvoiceStatusCancelled {
+				continue
+			}
+			usedSub += p.SubTotal
+			usedDisc += p.DiscountTotal
+			usedTax += p.TaxTotal
+			usedAdj += p.Adjustment
+			usedExc += p.ExciseDuty
+			usedTDS += p.TDSAmount
+			usedTCS += p.TCSAmount
+		}
+		subTotal = roundCurrency(parent.SubTotal - usedSub)
+		discountTotal = roundCurrency(parent.DiscountTotal - usedDisc)
+		taxTotal = roundCurrency(parent.TaxTotal - usedTax)
+		adjustment = roundCurrency(parent.Adjustment - usedAdj)
+		exciseDuty = roundCurrency(parent.ExciseDuty - usedExc)
+		tdsAmt = roundCurrency(parent.TDSAmount - usedTDS)
+		tcsAmt = roundCurrency(parent.TCSAmount - usedTCS)
+	} else {
+		ratio := 1.0
+		if parent.TotalAmount > 0 {
+			ratio = paidAmt / parent.TotalAmount
+		}
+		subTotal = roundCurrency(parent.SubTotal * ratio)
+		discountTotal = roundCurrency(parent.DiscountTotal * ratio)
+		taxTotal = roundCurrency(parent.TaxTotal * ratio)
+		adjustment = roundCurrency(parent.Adjustment * ratio)
+		exciseDuty = roundCurrency(parent.ExciseDuty * ratio)
+		tdsAmt = roundCurrency(parent.TDSAmount * ratio)
+		tcsAmt = roundCurrency(parent.TCSAmount * ratio)
+	}
+
+	computedTotal := roundCurrency(subTotal - discountTotal + taxTotal + adjustment + exciseDuty)
+	if diff := roundCurrency(paidAmt - computedTotal); math.Abs(diff) > 0 && math.Abs(diff) <= 0.05 {
+		subTotal = roundCurrency(subTotal + diff)
+	}
+
+	ratio := 1.0
+	if parent.TotalAmount > 0 {
+		ratio = paidAmt / parent.TotalAmount
+	}
+	items := make([]domain.InvoiceItem, 0, len(parent.Items))
+	for _, orig := range parent.Items {
+		items = append(items, domain.InvoiceItem{
+			ID:                uuid.New(),
+			InvoiceID:         partialID,
+			ItemID:            orig.ItemID,
+			ItemType:          orig.ItemType,
+			Name:              orig.Name,
+			Description:       orig.Description,
+			Quantity:          orig.Quantity,
+			UnitPrice:         roundCurrency(orig.UnitPrice * ratio),
+			Discount:          roundCurrency(orig.Discount * ratio),
+			Tax:               roundCurrency(orig.Tax * ratio),
+			Total:             roundCurrency(orig.Total * ratio),
+			ServiceCategoryID: orig.ServiceCategoryID,
+			PartCategoryID:    orig.PartCategoryID,
+			Metadata:          orig.Metadata,
+			CreatedAt:         now,
+			UpdatedAt:         now,
+		})
+	}
+
+	installmentNum := 1
+	for _, p := range priorPartials {
+		if p.Status != domain.InvoiceStatusVoid && p.Status != domain.InvoiceStatusCancelled {
+			installmentNum++
+		}
+	}
+	if installmentNum == 1 && prevPaid > 0.01 {
+		installmentNum = 2
+	}
+
+	remainingOrderBalance := roundCurrency(parent.BalanceAmount - paidAmt)
+	if remainingOrderBalance < 0.01 {
+		remainingOrderBalance = 0
+	}
+
+	salesOrderStr := resolvedSalesOrder
+	if salesOrderStr == "" {
+		salesOrderStr = parent.SalesOrder
+	}
+
+	subject := fmt.Sprintf("%s (Partial Payment #%d)", parent.Subject, installmentNum)
+	if len(subject) > 255 {
+		subject = subject[:255]
+	}
+
+	return &domain.Invoice{
+		ID:                  partialID,
+		OrganizationID:      parent.OrganizationID,
+		CustomerID:          parent.CustomerID,
+		ContactID:           parent.ContactID,
+		OwnerID:             parent.OwnerID,
+		Subject:             subject,
+		InvoiceNumber:       &invoiceNumber,
+		SourceSystem:        parent.SourceSystem,
+		SourceReferenceID:   parent.SourceReferenceID,
+		ReferenceNo:         parent.ReferenceNo,
+		PaymentTerms:        parent.PaymentTerms,
+		SalesOrder:          salesOrderStr,
+		SalesOrderID:        parent.SalesOrderID,
+		PurchaseOrder:       parent.PurchaseOrder,
+		InvoiceDate:         paymentDate,
+		DueDate:             parent.DueDate,
+		Status:              domain.InvoiceStatusPaid,
+		SubTotal:            subTotal,
+		DiscountTotal:       discountTotal,
+		TaxTotal:            taxTotal,
+		Adjustment:          adjustment,
+		ExciseDuty:          exciseDuty,
+		SalesCommission:     roundCurrency(parent.SalesCommission * ratio),
+		TDSAmount:           tdsAmt,
+		TCSAmount:           tcsAmt,
+		TotalAmount:         paidAmt,
+		PaidAmount:          paidAmt,
+		BalanceAmount:       0,
+		Currency:            parent.Currency,
+		Terms:               parent.Terms,
+		Notes:               parent.Notes,
+		ServiceCategoryID:   parent.ServiceCategoryID,
+		PartCategoryID:      parent.PartCategoryID,
+		ServiceAddressID:    parent.ServiceAddressID,
+		BillingAddressID:    parent.BillingAddressID,
+		ShippingAddressID:   parent.ShippingAddressID,
+		ParentInvoiceID:     &parent.ID,
+		ParentInvoiceNumber: parent.InvoiceNumber,
+		IsPartialInvoice:    true,
+		ActualAmount:        parent.TotalAmount,
+		PreviousPaidAmount:  prevPaid,
+		ActualDiscountTotal: parent.DiscountTotal,
+		ActualTaxTotal:      parent.TaxTotal,
+		ActualAdjustment:    parent.Adjustment,
+		OrderBalanceAmount:  remainingOrderBalance,
+		Items:               items,
+		CreatedAt:           now,
+		UpdatedAt:           now,
+	}
+}
+
 // RecordPayment records a new payment against an invoice
 func (s *PaymentService) RecordPayment(ctx context.Context, req dto.RecordPaymentRequest) (*dto.PaymentResponse, error) {
 	// 1. Get invoice and validate
@@ -83,8 +250,44 @@ func (s *PaymentService) RecordPayment(ctx context.Context, req dto.RecordPaymen
 		}
 	}
 
-	// 4. Create payment and update invoice in a single save flow
+	// 4. Create payment and generate a distinct partial-payment invoice when this is a partial/installment payment
 	fmt.Printf("[INFO] Recording payment of %.2f for invoice %s (Current Balance: %.2f)\n", req.Amount, invoice.ID, invoice.BalanceAmount)
+
+	prevPaid := invoice.PaidAmount
+	isPartialFlow := invoice.Status == domain.InvoiceStatusPartial || prevPaid > epsilon || req.Amount < (invoice.BalanceAmount-epsilon)
+
+	resolvedSalesOrder := invoice.SalesOrder
+	if resolvedSalesOrder == "" && invoice.SalesOrderID != nil && s.salesOrderRepo != nil {
+		if so, soErr := s.salesOrderRepo.FindByID(*invoice.SalesOrderID); soErr == nil && so != nil && so.OrderNumber != nil {
+			resolvedSalesOrder = *so.OrderNumber
+			invoice.SalesOrder = resolvedSalesOrder
+		}
+	}
+
+	var partialInv *domain.Invoice
+	if isPartialFlow {
+		priorPartials, _ := s.invoiceRepo.ListByParentInvoiceID(ctx, invoice.ID)
+		partialNum, err := s.invoiceRepo.GetNextInvoiceNumber(ctx, invoice.OrganizationID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate partial invoice number: %w", err)
+		}
+		partialInv = BuildPartialPaymentInvoice(invoice, paymentDate, partialNum, req.Amount, prevPaid, priorPartials, resolvedSalesOrder)
+		if err := s.invoiceRepo.Create(ctx, partialInv); err != nil {
+			return nil, fmt.Errorf("failed to create partial payment invoice: %w", err)
+		}
+		partialAudit := &domain.InvoiceAuditLog{
+			ID:             uuid.New(),
+			OrganizationID: partialInv.OrganizationID,
+			InvoiceID:      partialInv.ID,
+			Action:         "PARTIAL_INVOICE_CREATED",
+			OldStatus:      "",
+			NewStatus:      string(partialInv.Status),
+			Notes:          fmt.Sprintf("Partial payment invoice %s generated for %.2f against parent invoice", partialNum, req.Amount),
+			PerformedBy:    "system",
+			CreatedAt:      time.Now().UTC(),
+		}
+		_ = s.auditRepo.Create(ctx, partialAudit)
+	}
 
 	payment := &domain.Payment{
 		ID:             uuid.New(),
@@ -99,6 +302,10 @@ func (s *PaymentService) RecordPayment(ctx context.Context, req dto.RecordPaymen
 		CreatedAt:      time.Now().UTC(),
 		UpdatedAt:      time.Now().UTC(),
 	}
+	if partialInv != nil {
+		payment.PartialInvoiceID = &partialInv.ID
+		payment.PartialInvoiceNumber = partialInv.InvoiceNumber
+	}
 
 	if err := s.paymentRepo.Create(ctx, payment); err != nil {
 		return nil, fmt.Errorf("failed to create payment: %w", err)
@@ -106,8 +313,11 @@ func (s *PaymentService) RecordPayment(ctx context.Context, req dto.RecordPaymen
 
 	// 5. Update invoice amounts
 	oldStatus := invoice.Status
-	invoice.PaidAmount += req.Amount
-	invoice.BalanceAmount -= req.Amount
+	invoice.PaidAmount = roundCurrency(invoice.PaidAmount + req.Amount)
+	invoice.BalanceAmount = roundCurrency(invoice.BalanceAmount - req.Amount)
+	if invoice.BalanceAmount < epsilon {
+		invoice.BalanceAmount = 0
+	}
 
 	// 6. Derive new status from payment amounts
 	invoice.Status = invoice.CalculateStatus()
@@ -119,6 +329,10 @@ func (s *PaymentService) RecordPayment(ctx context.Context, req dto.RecordPaymen
 	}
 
 	// 7. Create audit log
+	auditNotes := fmt.Sprintf("Payment of %.2f recorded via %s", req.Amount, req.Method)
+	if partialInv != nil && partialInv.InvoiceNumber != nil {
+		auditNotes = fmt.Sprintf("Partial payment of %.2f recorded via %s (Invoice %s generated)", req.Amount, req.Method, *partialInv.InvoiceNumber)
+	}
 	auditLog := &domain.InvoiceAuditLog{
 		ID:             uuid.New(),
 		OrganizationID: invoice.OrganizationID,
@@ -126,7 +340,7 @@ func (s *PaymentService) RecordPayment(ctx context.Context, req dto.RecordPaymen
 		Action:         "PAYMENT_RECORDED",
 		OldStatus:      string(oldStatus),
 		NewStatus:      string(invoice.Status),
-		Notes:          fmt.Sprintf("Payment of %.2f recorded via %s", req.Amount, req.Method),
+		Notes:          auditNotes,
 		PerformedBy:    "system", // TODO: Get from context
 		CreatedAt:      time.Now().UTC(),
 	}
@@ -136,7 +350,14 @@ func (s *PaymentService) RecordPayment(ctx context.Context, req dto.RecordPaymen
 	s.publishPaymentReceived(payment, invoice)
 	s.publishPaymentRecorded(payment, invoice) // For work order status updates
 
-	// Only publish invoice paid event when fully paid
+	if invoice.Status == domain.InvoiceStatusPartial {
+		s.publishInvoicePartiallyPaid(invoice)
+		if invoice.SalesOrderID != nil {
+			_ = s.salesOrderRepo.UpdateStatus(ctx, *invoice.SalesOrderID, domain.SalesOrderStatusPartiallyPaid)
+		}
+	}
+
+	// Publish invoice paid event when fully paid
 	if invoice.Status == domain.InvoiceStatusPaid {
 		s.publishInvoicePaid(invoice)
 
@@ -248,15 +469,41 @@ func (s *PaymentService) VoidPayment(ctx context.Context, paymentID uuid.UUID, n
 
 	// 5. Recalculate invoice amounts
 	oldInvoiceStatus := invoice.Status
-	invoice.PaidAmount -= payment.Amount
-	invoice.BalanceAmount += payment.Amount
+	invoice.PaidAmount = roundCurrency(invoice.PaidAmount - payment.Amount)
+	if invoice.PaidAmount < 0.01 {
+		invoice.PaidAmount = 0
+	}
+	invoice.BalanceAmount = roundCurrency(invoice.BalanceAmount + payment.Amount)
+	if invoice.BalanceAmount > invoice.TotalAmount {
+		invoice.BalanceAmount = invoice.TotalAmount
+	}
 
 	// 6. Derive new status
-	invoice.Status = invoice.CalculateStatus()
+	if invoice.PaidAmount == 0 {
+		invoice.Status = domain.InvoiceStatusSent
+	} else {
+		invoice.Status = invoice.CalculateStatus()
+	}
 	invoice.PDFPath = nil // Invalidate cached PDF so next download/preview reflects voided payment
 
 	if err := s.invoiceRepo.Update(ctx, invoice); err != nil {
 		return fmt.Errorf("failed to update invoice: %w", err)
+	}
+
+	if payment.PartialInvoiceID != nil {
+		if childInv, errChild := s.invoiceRepo.GetByID(ctx, *payment.PartialInvoiceID); errChild == nil && childInv != nil {
+			childInv.Status = domain.InvoiceStatusVoid
+			childInv.PDFPath = nil
+			_ = s.invoiceRepo.Update(ctx, childInv)
+		}
+	}
+
+	if invoice.SalesOrderID != nil && s.salesOrderRepo != nil {
+		if invoice.Status == domain.InvoiceStatusPartial {
+			_ = s.salesOrderRepo.UpdateStatus(ctx, *invoice.SalesOrderID, domain.SalesOrderStatusPartiallyPaid)
+		} else if invoice.Status == domain.InvoiceStatusSent {
+			_ = s.salesOrderRepo.UpdateStatus(ctx, *invoice.SalesOrderID, domain.SalesOrderStatusInvoiced)
+		}
 	}
 
 	// 7. Create audit log
@@ -376,12 +623,22 @@ func (s *PaymentService) mapInvoiceToResponse(ctx context.Context, inv *domain.I
 		Adjustment:      inv.Adjustment,
 		ExciseDuty:      inv.ExciseDuty,
 		SalesCommission: inv.SalesCommission,
-		SalesOrder:      inv.SalesOrder,
-		PurchaseOrder:   inv.PurchaseOrder,
-		PaymentTerms:    inv.PaymentTerms,
-		Currency:        inv.Currency,
-		ServiceCategoryID: inv.ServiceCategoryID,
-		PartCategoryID:    inv.PartCategoryID,
+		SalesOrder:          inv.SalesOrder,
+		SalesOrderID:        inv.SalesOrderID,
+		PurchaseOrder:       inv.PurchaseOrder,
+		PaymentTerms:        inv.PaymentTerms,
+		Currency:            inv.Currency,
+		ServiceCategoryID:   inv.ServiceCategoryID,
+		PartCategoryID:      inv.PartCategoryID,
+		ParentInvoiceID:     inv.ParentInvoiceID,
+		ParentInvoiceNumber: inv.ParentInvoiceNumber,
+		IsPartialInvoice:    inv.IsPartialInvoice,
+		ActualAmount:        inv.ActualAmount,
+		PreviousPaidAmount:  inv.PreviousPaidAmount,
+		ActualDiscountTotal: inv.ActualDiscountTotal,
+		ActualTaxTotal:      inv.ActualTaxTotal,
+		ActualAdjustment:    inv.ActualAdjustment,
+		OrderBalanceAmount:  inv.OrderBalanceAmount,
 		OwnerID:         inv.OwnerID,
 		CustomerID:        inv.CustomerID,
 		ContactID:         inv.ContactID,
@@ -468,18 +725,29 @@ func (s *PaymentService) mapInvoiceToResponse(ctx context.Context, inv *domain.I
 			if txID == "" {
 				txID = p.ID.String()
 			}
+			var partialInvID *string
+			var partialInvNum string
+			if p.PartialInvoiceID != nil {
+				sID := p.PartialInvoiceID.String()
+				partialInvID = &sID
+			}
+			if p.PartialInvoiceNumber != nil {
+				partialInvNum = *p.PartialInvoiceNumber
+			}
 			res.Payments = append(res.Payments, dto.PaymentResponse{
-				ID:            p.ID.String(),
-				InvoiceID:     p.InvoiceID.String(),
-				Amount:        p.Amount,
-				Method:        string(p.Method),
-				Reference:     p.Reference,
-				TransactionID: txID,
-				PaymentDate:   ConvertToOrgTZValue(ctx, p.PaymentDate, inv.OrganizationID, s.rmRepo),
-				Status:        string(p.Status),
-				Notes:         p.Notes,
-				CreatedAt:     ConvertToOrgTZValue(ctx, p.CreatedAt, inv.OrganizationID, s.rmRepo),
-				UpdatedAt:     ConvertToOrgTZValue(ctx, p.UpdatedAt, inv.OrganizationID, s.rmRepo),
+				ID:                   p.ID.String(),
+				InvoiceID:            p.InvoiceID.String(),
+				PartialInvoiceID:     partialInvID,
+				PartialInvoiceNumber: partialInvNum,
+				Amount:               p.Amount,
+				Method:               string(p.Method),
+				Reference:            p.Reference,
+				TransactionID:        txID,
+				PaymentDate:          ConvertToOrgTZValue(ctx, p.PaymentDate, inv.OrganizationID, s.rmRepo),
+				Status:               string(p.Status),
+				Notes:                p.Notes,
+				CreatedAt:            ConvertToOrgTZValue(ctx, p.CreatedAt, inv.OrganizationID, s.rmRepo),
+				UpdatedAt:            ConvertToOrgTZValue(ctx, p.UpdatedAt, inv.OrganizationID, s.rmRepo),
 			})
 		}
 	}
@@ -553,6 +821,13 @@ func (s *PaymentService) mapToResponse(ctx context.Context, payment *domain.Paym
 		CreatedAt:     ConvertToOrgTZValue(ctx, payment.CreatedAt, payment.OrganizationID, s.rmRepo),
 		UpdatedAt:     ConvertToOrgTZValue(ctx, payment.UpdatedAt, payment.OrganizationID, s.rmRepo),
 	}
+	if payment.PartialInvoiceID != nil {
+		sID := payment.PartialInvoiceID.String()
+		resp.PartialInvoiceID = &sID
+	}
+	if payment.PartialInvoiceNumber != nil {
+		resp.PartialInvoiceNumber = *payment.PartialInvoiceNumber
+	}
 
 	// Fetch related invoice and customer info to populate InvoiceNumber and CustomerName
 	invoice, err := s.invoiceRepo.GetByID(ctx, payment.InvoiceID)
@@ -564,6 +839,8 @@ func (s *PaymentService) mapToResponse(ctx context.Context, payment *domain.Paym
 		if invoice.InvoiceNumber != nil {
 			resp.InvoiceNumber = *invoice.InvoiceNumber
 		}
+		resp.SalesOrderID = invoice.SalesOrderID
+		resp.SalesOrder = invoice.SalesOrder
 		customer, err := s.getCustomer(ctx, invoice.CustomerID)
 		if err != nil {
 			log.Printf("[PaymentService.mapToResponse] Error fetching customer %s: %v", invoice.CustomerID, err)

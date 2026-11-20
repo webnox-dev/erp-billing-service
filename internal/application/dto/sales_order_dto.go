@@ -91,8 +91,9 @@ type SalesOrderResponse struct {
 	TaxTotal       float64             `json:"tax_total"`
 	TDSAmount      float64             `json:"tds_amount"`
 	TCSAmount      float64             `json:"tcs_amount"`
-	TotalAmount       float64             `json:"total_amount"`
-	InvoiceID         *uuid.UUID          `json:"invoice_id,omitempty"`
+	TotalAmount       float64                  `json:"total_amount"`
+	InvoiceID         *uuid.UUID               `json:"invoice_id,omitempty"`
+	Invoices          []InvoiceSummaryResponse `json:"invoices,omitempty"`
 	ServiceCategoryID *uuid.UUID          `json:"service_category_id,omitempty"`
 	PartCategoryID    *uuid.UUID          `json:"part_category_id,omitempty"`
 	BillingAddressID  *uuid.UUID          `json:"billing_address_id,omitempty"`

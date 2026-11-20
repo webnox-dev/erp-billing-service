@@ -34,6 +34,7 @@ func (r *InvoiceRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.
 		return nil, err
 	}
 	r.populateInvoiceAddressFields(ctx, &invoice)
+	r.populatePartialInvoiceRelations(ctx, &invoice)
 	return &invoice, nil
 }
 
@@ -296,7 +297,7 @@ func (r *InvoiceRepository) GetNextInvoiceNumber(ctx context.Context, orgID uuid
 	prefix := fmt.Sprintf("INV-%d-", year)
 
 	var invoiceNumbers []string
-	err := r.db.WithContext(ctx).Model(&domain.Invoice{}).
+	err := r.db.WithContext(ctx).Unscoped().Model(&domain.Invoice{}).
 		Where("organization_id = ? AND invoice_number LIKE ?", orgID, prefix+"%").
 		Pluck("invoice_number", &invoiceNumbers).Error
 	if err != nil {
@@ -328,10 +329,91 @@ func (r *InvoiceRepository) ListBySalesOrderID(ctx context.Context, salesOrderID
 		Preload("Items").
 		Preload("Payments").
 		Where("sales_order_id = ?", salesOrderID).
-		Order("created_at desc").
+		Order("created_at asc").
 		Find(&invoices).Error
 	if err == nil {
 		r.populateInvoicesAddressFields(ctx, invoices)
+		for i := range invoices {
+			r.populatePartialInvoiceRelations(ctx, &invoices[i])
+		}
 	}
 	return invoices, err
+}
+
+// ListByParentInvoiceID retrieves all partial payment invoices created against a parent invoice.
+func (r *InvoiceRepository) ListByParentInvoiceID(ctx context.Context, parentInvoiceID uuid.UUID) ([]domain.Invoice, error) {
+	var invoices []domain.Invoice
+	err := r.db.WithContext(ctx).
+		Preload("Items").
+		Preload("Payments").
+		Where("parent_invoice_id = ?", parentInvoiceID).
+		Order("created_at asc").
+		Find(&invoices).Error
+	if err == nil {
+		r.populateInvoicesAddressFields(ctx, invoices)
+		for i := range invoices {
+			r.populatePartialInvoiceRelations(ctx, &invoices[i])
+		}
+	}
+	return invoices, err
+}
+
+func (r *InvoiceRepository) populatePartialInvoiceRelations(ctx context.Context, invoice *domain.Invoice) {
+	if invoice == nil {
+		return
+	}
+	if invoice.IsPartialInvoice && invoice.ParentInvoiceID != nil {
+		var linkedPayments []domain.Payment
+		if err := r.db.WithContext(ctx).
+			Where("partial_invoice_id = ?", invoice.ID).
+			Order("payment_date asc, created_at asc").
+			Find(&linkedPayments).Error; err == nil && len(linkedPayments) > 0 {
+			invoice.Payments = linkedPayments
+		}
+
+		var allParentPayments []domain.Payment
+		if err := r.db.WithContext(ctx).
+			Where("invoice_id = ? AND status != ?", *invoice.ParentInvoiceID, domain.PaymentStatusVoid).
+			Order("payment_date asc, created_at asc").
+			Find(&allParentPayments).Error; err == nil && len(allParentPayments) > 0 {
+			var currentCreatedAt *time.Time
+			var currentID uuid.UUID
+			if len(invoice.Payments) > 0 {
+				t := invoice.Payments[0].CreatedAt
+				currentCreatedAt = &t
+				currentID = invoice.Payments[0].ID
+			}
+			for _, p := range allParentPayments {
+				if p.PartialInvoiceID != nil && *p.PartialInvoiceID == invoice.ID {
+					continue
+				}
+				if p.ID == currentID {
+					continue
+				}
+				if currentCreatedAt != nil && p.CreatedAt.After(*currentCreatedAt) {
+					continue
+				}
+				invoice.PreviousPayments = append(invoice.PreviousPayments, p)
+			}
+		}
+		return
+	}
+
+	// Non-partial invoice: attach child partial invoices when queried directly
+	var children []domain.Invoice
+	if err := r.db.WithContext(ctx).
+		Where("parent_invoice_id = ?", invoice.ID).
+		Order("created_at asc").
+		Find(&children).Error; err == nil && len(children) > 0 {
+		for i := range children {
+			var childPayments []domain.Payment
+			if errPay := r.db.WithContext(ctx).
+				Where("partial_invoice_id = ?", children[i].ID).
+				Order("created_at asc").
+				Find(&childPayments).Error; errPay == nil {
+				children[i].Payments = childPayments
+			}
+		}
+		invoice.ChildInvoices = children
+	}
 }

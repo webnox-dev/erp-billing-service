@@ -231,10 +231,10 @@ func (s *SalesReturnService) ProcessRefund(id uuid.UUID, req *dto.ProcessRefundR
 		return nil, fmt.Errorf("failed to look up invoices for sales order: %w", err)
 	}
 
-	// Find the PAID invoice among all linked invoices
+	// Find the PAID non-partial invoice among all linked invoices
 	var invoice *domain.Invoice
 	for i := range invoices {
-		if invoices[i].CanRefund() {
+		if !invoices[i].IsPartialInvoice && invoices[i].CanRefund() {
 			invoice = &invoices[i]
 			break
 		}

@@ -784,7 +784,48 @@ func (s *SalesOrderService) GetSalesOrder(id uuid.UUID) (*dto.SalesOrderResponse
 	if err != nil {
 		return nil, fmt.Errorf("failed to find sales order: %w", err)
 	}
-	return s.toSalesOrderResponse(context.Background(), salesOrder), nil
+	resp := s.toSalesOrderResponse(context.Background(), salesOrder)
+	if s.invoiceRepo != nil {
+		if invoices, invErr := s.invoiceRepo.ListBySalesOrderID(context.Background(), id); invErr == nil && len(invoices) > 0 {
+			resp.Invoices = make([]dto.InvoiceSummaryResponse, 0, len(invoices))
+			for _, inv := range invoices {
+				method, txID := "", ""
+				for _, p := range inv.Payments {
+					if p.DeletedAt == nil && p.Status != domain.PaymentStatusVoid {
+						method = string(p.Method)
+						txID = strings.TrimSpace(p.Reference)
+						if txID == "" {
+							txID = p.ID.String()
+						}
+						break
+					}
+				}
+				resp.Invoices = append(resp.Invoices, dto.InvoiceSummaryResponse{
+					ID:                  inv.ID,
+					InvoiceNumber:       inv.InvoiceNumber,
+					Status:              string(inv.Status),
+					IsPartialInvoice:    inv.IsPartialInvoice,
+					ParentInvoiceID:     inv.ParentInvoiceID,
+					ParentInvoiceNumber: inv.ParentInvoiceNumber,
+					ActualAmount:        inv.ActualAmount,
+					PreviousPaidAmount:  inv.PreviousPaidAmount,
+					SubTotal:            inv.SubTotal,
+					DiscountTotal:       inv.DiscountTotal,
+					TaxTotal:            inv.TaxTotal,
+					Adjustment:          inv.Adjustment,
+					TotalAmount:         inv.TotalAmount,
+					PaidAmount:          inv.PaidAmount,
+					BalanceAmount:       inv.BalanceAmount,
+					OrderBalanceAmount:  inv.OrderBalanceAmount,
+					Method:              method,
+					TransactionID:       txID,
+					InvoiceDate:         ConvertToOrgTZValue(context.Background(), inv.InvoiceDate, salesOrder.OrganizationID, s.rmRepo),
+					CreatedAt:           ConvertToOrgTZValue(context.Background(), inv.CreatedAt, salesOrder.OrganizationID, s.rmRepo),
+				})
+			}
+		}
+	}
+	return resp, nil
 }
 
 // ListSalesOrders retrieves sales orders with filters

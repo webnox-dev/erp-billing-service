@@ -940,8 +940,8 @@ func (s *InvoiceService) DeleteInvoice(ctx context.Context, id uuid.UUID) error 
 		return fmt.Errorf("invoice not found")
 	}
 
-	// 2. Business rule: prevent deletion of paid or partially paid invoices
-	if strings.EqualFold(string(invoice.Status), string(domain.InvoiceStatusPaid)) || invoice.PaidAmount > 0 {
+	// 2. Business rule: prevent deletion of paid, partially paid, or partial installment invoices
+	if strings.EqualFold(string(invoice.Status), string(domain.InvoiceStatusPaid)) || invoice.PaidAmount > 0 || invoice.IsPartialInvoice || len(invoice.ChildInvoices) > 0 {
 		invLabel := ""
 		if invoice.InvoiceNumber != nil && *invoice.InvoiceNumber != "" {
 			invLabel = fmt.Sprintf(" (%s)", *invoice.InvoiceNumber)
@@ -1166,12 +1166,22 @@ func (s *InvoiceService) mapToResponse(ctx context.Context, inv *domain.Invoice)
 		Adjustment:      inv.Adjustment,
 		ExciseDuty:      inv.ExciseDuty,
 		SalesCommission: inv.SalesCommission,
-		SalesOrder:      inv.SalesOrder,
-		PurchaseOrder:   inv.PurchaseOrder,
-		PaymentTerms:    inv.PaymentTerms,
-		Currency:        inv.Currency,
-		ServiceCategoryID: inv.ServiceCategoryID,
-		PartCategoryID:    inv.PartCategoryID,
+		SalesOrder:          inv.SalesOrder,
+		SalesOrderID:        inv.SalesOrderID,
+		PurchaseOrder:       inv.PurchaseOrder,
+		PaymentTerms:        inv.PaymentTerms,
+		Currency:            inv.Currency,
+		ServiceCategoryID:   inv.ServiceCategoryID,
+		PartCategoryID:      inv.PartCategoryID,
+		ParentInvoiceID:     inv.ParentInvoiceID,
+		ParentInvoiceNumber: inv.ParentInvoiceNumber,
+		IsPartialInvoice:    inv.IsPartialInvoice,
+		ActualAmount:        inv.ActualAmount,
+		PreviousPaidAmount:  inv.PreviousPaidAmount,
+		ActualDiscountTotal: inv.ActualDiscountTotal,
+		ActualTaxTotal:      inv.ActualTaxTotal,
+		ActualAdjustment:    inv.ActualAdjustment,
+		OrderBalanceAmount:  inv.OrderBalanceAmount,
 		OwnerID:         inv.OwnerID,
 		CustomerID:        inv.CustomerID,
 		ContactID:         inv.ContactID,
@@ -1293,25 +1303,86 @@ func (s *InvoiceService) mapToResponse(ctx context.Context, inv *domain.Invoice)
 		res.AuthorName = s.getAuthorName(ctx, inv, nil)
 	}
 
+	mapPayment := func(p domain.Payment) dto.PaymentResponse {
+		txID := p.Reference
+		if txID == "" {
+			txID = p.ID.String()
+		}
+		var partialInvID *string
+		var partialInvNum string
+		if p.PartialInvoiceID != nil {
+			sID := p.PartialInvoiceID.String()
+			partialInvID = &sID
+		}
+		if p.PartialInvoiceNumber != nil {
+			partialInvNum = *p.PartialInvoiceNumber
+		}
+		return dto.PaymentResponse{
+			ID:                   p.ID.String(),
+			InvoiceID:            p.InvoiceID.String(),
+			PartialInvoiceID:     partialInvID,
+			PartialInvoiceNumber: partialInvNum,
+			Amount:               p.Amount,
+			Method:               string(p.Method),
+			Reference:            p.Reference,
+			TransactionID:        txID,
+			PaymentDate:          ConvertToOrgTZValue(ctx, p.PaymentDate, inv.OrganizationID, s.rmRepo),
+			Status:               string(p.Status),
+			Notes:                p.Notes,
+			CreatedAt:            ConvertToOrgTZValue(ctx, p.CreatedAt, inv.OrganizationID, s.rmRepo),
+			UpdatedAt:            ConvertToOrgTZValue(ctx, p.UpdatedAt, inv.OrganizationID, s.rmRepo),
+		}
+	}
+
 	if len(inv.Payments) > 0 {
 		res.Payments = make([]dto.PaymentResponse, 0, len(inv.Payments))
 		for _, p := range inv.Payments {
-			txID := p.Reference
-			if txID == "" {
-				txID = p.ID.String()
+			res.Payments = append(res.Payments, mapPayment(p))
+		}
+	}
+
+	if len(inv.PreviousPayments) > 0 {
+		res.PreviousPayments = make([]dto.PaymentResponse, 0, len(inv.PreviousPayments))
+		for _, p := range inv.PreviousPayments {
+			res.PreviousPayments = append(res.PreviousPayments, mapPayment(p))
+		}
+	}
+
+	if len(inv.ChildInvoices) > 0 {
+		res.ChildInvoices = make([]dto.InvoiceSummaryResponse, 0, len(inv.ChildInvoices))
+		for _, ch := range inv.ChildInvoices {
+			method, txID := "", ""
+			for _, cp := range ch.Payments {
+				if cp.DeletedAt == nil && cp.Status != domain.PaymentStatusVoid {
+					method = string(cp.Method)
+					txID = strings.TrimSpace(cp.Reference)
+					if txID == "" {
+						txID = cp.ID.String()
+					}
+					break
+				}
 			}
-			res.Payments = append(res.Payments, dto.PaymentResponse{
-				ID:            p.ID.String(),
-				InvoiceID:     p.InvoiceID.String(),
-				Amount:        p.Amount,
-				Method:        string(p.Method),
-				Reference:     p.Reference,
-				TransactionID: txID,
-				PaymentDate:   ConvertToOrgTZValue(ctx, p.PaymentDate, inv.OrganizationID, s.rmRepo),
-				Status:        string(p.Status),
-				Notes:         p.Notes,
-				CreatedAt:     ConvertToOrgTZValue(ctx, p.CreatedAt, inv.OrganizationID, s.rmRepo),
-				UpdatedAt:     ConvertToOrgTZValue(ctx, p.UpdatedAt, inv.OrganizationID, s.rmRepo),
+			res.ChildInvoices = append(res.ChildInvoices, dto.InvoiceSummaryResponse{
+				ID:                  ch.ID,
+				InvoiceNumber:       ch.InvoiceNumber,
+				Status:              string(ch.Status),
+				IsPartialInvoice:    ch.IsPartialInvoice,
+				ParentInvoiceID:     ch.ParentInvoiceID,
+				ParentInvoiceNumber: ch.ParentInvoiceNumber,
+				ActualAmount:        ch.ActualAmount,
+				PreviousPaidAmount:  ch.PreviousPaidAmount,
+				SubTotal:            ch.SubTotal,
+				DiscountTotal:       ch.DiscountTotal,
+				TaxTotal:            ch.TaxTotal,
+				Adjustment:          ch.Adjustment,
+				TotalAmount:         ch.TotalAmount,
+				PaidAmount:          ch.PaidAmount,
+				BalanceAmount:       ch.BalanceAmount,
+				OrderBalanceAmount:  ch.OrderBalanceAmount,
+				Method:              method,
+				TransactionID:       txID,
+				InvoiceDate:         ConvertToOrgTZValue(ctx, ch.InvoiceDate, inv.OrganizationID, s.rmRepo),
+				CreatedAt:           ConvertToOrgTZValue(ctx, ch.CreatedAt, inv.OrganizationID, s.rmRepo),
 			})
 		}
 	}

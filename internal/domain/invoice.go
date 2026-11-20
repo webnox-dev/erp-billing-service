@@ -74,6 +74,19 @@ type Invoice struct {
 	ServiceCategoryID *uuid.UUID `gorm:"type:uuid;index" json:"service_category_id,omitempty"`
 	PartCategoryID    *uuid.UUID `gorm:"type:uuid;index" json:"part_category_id,omitempty"`
 
+	// Partial payment invoice linkage and breakdown
+	ParentInvoiceID     *uuid.UUID `gorm:"type:uuid;index" json:"parent_invoice_id,omitempty"`
+	ParentInvoiceNumber *string    `gorm:"type:varchar(50)" json:"parent_invoice_number,omitempty"`
+	IsPartialInvoice    bool       `gorm:"default:false;index" json:"is_partial_invoice"`
+	ActualAmount        float64    `gorm:"type:decimal(15,2);default:0" json:"actual_amount"`
+	PreviousPaidAmount  float64    `gorm:"type:decimal(15,2);default:0" json:"previous_paid_amount"`
+	ActualDiscountTotal float64    `gorm:"type:decimal(15,2);default:0" json:"actual_discount_total"`
+	ActualTaxTotal      float64    `gorm:"type:decimal(15,2);default:0" json:"actual_tax_total"`
+	ActualAdjustment    float64    `gorm:"type:decimal(15,2);default:0" json:"actual_adjustment"`
+	OrderBalanceAmount  float64    `gorm:"type:decimal(15,2);default:0" json:"order_balance_amount"`
+	PreviousPayments    []Payment  `gorm:"-" json:"previous_payments,omitempty"`
+	ChildInvoices       []Invoice  `gorm:"-" json:"child_invoices,omitempty"`
+
 	// TDS/TCS amounts
 	TDSAmount float64 `gorm:"type:decimal(15,2);default:0" json:"tds_amount"`
 	TCSAmount float64 `gorm:"type:decimal(15,2);default:0" json:"tcs_amount"`
@@ -143,13 +156,13 @@ func (i *Invoice) CanTransitionTo(newStatus InvoiceStatus) error {
 
 // CanReceivePayment returns true if the invoice can accept payments
 func (i *Invoice) CanReceivePayment() bool {
-	return i.Status == InvoiceStatusSent || i.Status == InvoiceStatusPartial || i.Status == InvoiceStatusOverdue
+	return !i.IsPartialInvoice && i.BalanceAmount > 0.01 && (i.Status == InvoiceStatusSent || i.Status == InvoiceStatusPartial || i.Status == InvoiceStatusOverdue)
 }
 
 // CanRefund returns true if the invoice can be refunded
-// Only PAID invoices can be refunded
+// Only PAID non-partial invoices can be refunded
 func (i *Invoice) CanRefund() bool {
-	return i.Status == InvoiceStatusPaid
+	return !i.IsPartialInvoice && i.Status == InvoiceStatusPaid
 }
 
 // CalculateStatus derives the invoice status based on payment amounts
@@ -209,9 +222,11 @@ type Payment struct {
 	Method         PaymentMethod `gorm:"type:varchar(50);column:payment_method" json:"method"`
 	Reference      string        `gorm:"type:varchar(100);column:transaction_ref" json:"reference"`
 	Status         PaymentStatus `gorm:"type:varchar(20);default:'completed'" json:"status"`
-	PaymentType    PaymentType   `gorm:"type:varchar(20);default:'payment'" json:"payment_type"`
-	SalesReturnID  *uuid.UUID    `gorm:"type:uuid;index" json:"sales_return_id"`
-	Notes          string        `gorm:"type:text" json:"notes"`
+	PaymentType          PaymentType   `gorm:"type:varchar(20);default:'payment'" json:"payment_type"`
+	SalesReturnID        *uuid.UUID    `gorm:"type:uuid;index" json:"sales_return_id"`
+	PartialInvoiceID     *uuid.UUID    `gorm:"type:uuid;index" json:"partial_invoice_id,omitempty"`
+	PartialInvoiceNumber *string       `gorm:"type:varchar(50)" json:"partial_invoice_number,omitempty"`
+	Notes                string        `gorm:"type:text" json:"notes"`
 	CreatedAt      time.Time     `json:"created_at"`
 	UpdatedAt      time.Time     `json:"updated_at"`
 	DeletedAt      *time.Time    `gorm:"index" json:"deleted_at,omitempty"`
