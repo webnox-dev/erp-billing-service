@@ -65,6 +65,10 @@ func NewInvoiceService(
 // CreateInvoice creates a new invoice in DRAFT status
 // Invoice number is NOT generated here - it's generated when invoice is SENT
 func (s *InvoiceService) CreateInvoice(ctx context.Context, orgID uuid.UUID, req dto.CreateInvoiceRequest) (*dto.InvoiceResponse, error) {
+	if req.CustomerID == uuid.Nil {
+		return nil, fmt.Errorf("invalid customer_id: customer is required")
+	}
+
 	// Parse source system
 	sourceSystem := domain.SourceSystemManual
 	if req.SourceSystem != "" {
@@ -755,6 +759,12 @@ func (s *InvoiceService) SendInvoice(ctx context.Context, id uuid.UUID, req dto.
 		return nil, fmt.Errorf("cannot send invoice in %s status - only DRAFT invoices can be sent", invoice.Status)
 	}
 
+	// 2b. Validate customer completeness and recipient email before assigning number/PDF/SENT status
+	ctxWithOrg := withOrgInContext(ctx, invoice.OrganizationID)
+	if err := s.validateSendRecipient(ctxWithOrg, invoice); err != nil {
+		return nil, err
+	}
+
 	// 3. Generate invoice number
 	invNum, err := s.invoiceRepo.GetNextInvoiceNumber(ctx, invoice.OrganizationID)
 	if err != nil {
@@ -1219,6 +1229,7 @@ func (s *InvoiceService) mapToResponse(ctx context.Context, inv *domain.Invoice)
 	contact := s.getContactForInvoice(ctxWithOrg, inv)
 
 	if customer != nil {
+		custDisplayName := normalizeCustomerDisplayName(customer)
 		custPhone := customer.Phone
 		if custPhone == "" {
 			custPhone = customer.PhoneWork
@@ -1239,7 +1250,7 @@ func (s *InvoiceService) mapToResponse(ctx context.Context, inv *domain.Invoice)
 		}
 		res.Customer = &dto.CustomerResponse{
 			ID:          customer.ID,
-			DisplayName: customer.DisplayName,
+			DisplayName: custDisplayName,
 			CompanyName: customer.CompanyName,
 			Email:       custEmail,
 			Phone:       custPhone,
@@ -1432,12 +1443,31 @@ func withOrgInContext(ctx context.Context, orgID uuid.UUID) context.Context {
 	return context.WithValue(ctx, "organization_id", orgID.String())
 }
 
+func normalizeCustomerDisplayName(customer *domain.CustomerRM) string {
+	if customer == nil {
+		return ""
+	}
+	if name := strings.TrimSpace(customer.DisplayName); name != "" {
+		return name
+	}
+	if name := strings.TrimSpace(customer.FirstName + " " + customer.LastName); name != "" {
+		return name
+	}
+	return strings.TrimSpace(customer.CompanyName)
+}
+
 func (s *InvoiceService) getCustomer(ctx context.Context, id uuid.UUID) (*domain.CustomerRM, error) {
 	customer, err := s.rmRepo.GetCustomer(ctx, id)
+	if customer != nil && customer.DisplayName == "" {
+		customer.DisplayName = normalizeCustomerDisplayName(customer)
+	}
 	if (err != nil || customer == nil || customer.DisplayName == "") && s.customerClient != nil {
 		fmt.Printf("[INFO] Customer %s missing or invalid in ReadModel, fetching from Customer Service\n", id)
 		remoteCustomer, remoteErr := s.customerClient.GetCustomer(ctx, id)
 		if remoteErr == nil && remoteCustomer != nil {
+			if remoteCustomer.DisplayName == "" {
+				remoteCustomer.DisplayName = normalizeCustomerDisplayName(remoteCustomer)
+			}
 			return remoteCustomer, nil
 		}
 		if remoteErr != nil {
@@ -1735,37 +1765,38 @@ func (s *InvoiceService) getFSMDetails(ctx context.Context, invoice *domain.Invo
 	return workOrder, appointments, technicians
 }
 
-func (s *InvoiceService) sendInvoiceNotification(ctx context.Context, invoice *domain.Invoice, customer *domain.CustomerRM, org *domain.OrganizationRM) {
+func (s *InvoiceService) resolveSendRecipientEmails(ctx context.Context, invoice *domain.Invoice, customer *domain.CustomerRM, preloadedContact *domain.ContactRM) (string, []string) {
 	var contactEmail string
-	if invoice.ContactID != nil {
-		if contact, err := s.rmRepo.GetContact(ctx, *invoice.ContactID); err == nil && contact != nil && contact.Email != "" {
-			contactEmail = contact.Email
+	if preloadedContact != nil && strings.TrimSpace(preloadedContact.Email) != "" {
+		contactEmail = strings.TrimSpace(preloadedContact.Email)
+	} else if invoice.ContactID != nil {
+		if contact, err := s.rmRepo.GetContact(ctx, *invoice.ContactID); err == nil && contact != nil && strings.TrimSpace(contact.Email) != "" {
+			contactEmail = strings.TrimSpace(contact.Email)
 		} else if s.customerClient != nil {
-			if contact, err := s.customerClient.GetContact(ctx, *invoice.ContactID); err == nil && contact != nil && contact.Email != "" {
-				contactEmail = contact.Email
+			if contact, err := s.customerClient.GetContact(ctx, *invoice.ContactID); err == nil && contact != nil && strings.TrimSpace(contact.Email) != "" {
+				contactEmail = strings.TrimSpace(contact.Email)
 			}
 		}
 	}
 
 	var customerEmail string
-	if customer != nil && customer.Email != "" {
-		customerEmail = customer.Email
+	if customer != nil {
+		customerEmail = strings.TrimSpace(customer.Email)
 	}
 
 	var primaryContactEmail string
 	if customer != nil {
-		if contact, err := s.rmRepo.GetPrimaryContact(ctx, customer.ID); err == nil && contact != nil && contact.Email != "" {
-			primaryContactEmail = contact.Email
+		if contact, err := s.rmRepo.GetPrimaryContact(ctx, customer.ID); err == nil && contact != nil && strings.TrimSpace(contact.Email) != "" {
+			primaryContactEmail = strings.TrimSpace(contact.Email)
 		}
 	}
 
-	// Determine recipient and CC list
 	var recipientEmail string
 	var ccEmails []string
 
 	if contactEmail != "" {
 		recipientEmail = contactEmail
-		if customerEmail != "" && strings.ToLower(customerEmail) != strings.ToLower(contactEmail) {
+		if customerEmail != "" && !strings.EqualFold(customerEmail, contactEmail) {
 			ccEmails = append(ccEmails, customerEmail)
 		}
 	} else if customerEmail != "" {
@@ -1773,6 +1804,36 @@ func (s *InvoiceService) sendInvoiceNotification(ctx context.Context, invoice *d
 	} else if primaryContactEmail != "" {
 		recipientEmail = primaryContactEmail
 	}
+
+	return recipientEmail, ccEmails
+}
+
+func (s *InvoiceService) validateSendRecipient(ctx context.Context, invoice *domain.Invoice) error {
+	if invoice.CustomerID == uuid.Nil {
+		return fmt.Errorf("cannot send invoice: customer is required")
+	}
+
+	customer, err := s.getCustomer(ctx, invoice.CustomerID)
+	if err != nil || customer == nil {
+		return fmt.Errorf("cannot send invoice: customer details could not be found or are incomplete")
+	}
+
+	displayName := normalizeCustomerDisplayName(customer)
+	if displayName == "" || strings.EqualFold(displayName, "Unknown Customer") || strings.EqualFold(displayName, "Customer") {
+		return fmt.Errorf("cannot send invoice: valid customer name is required")
+	}
+
+	contact := s.getContactForInvoice(ctx, invoice)
+	recipientEmail, _ := s.resolveSendRecipientEmails(ctx, invoice, customer, contact)
+	if recipientEmail == "" || !strings.Contains(recipientEmail, "@") {
+		return fmt.Errorf("cannot send invoice: customer or contact email address is required")
+	}
+
+	return nil
+}
+
+func (s *InvoiceService) sendInvoiceNotification(ctx context.Context, invoice *domain.Invoice, customer *domain.CustomerRM, org *domain.OrganizationRM) {
+	recipientEmail, ccEmails := s.resolveSendRecipientEmails(ctx, invoice, customer, nil)
 
 	if recipientEmail == "" {
 		fmt.Printf("[WARNING] No email recipient found for invoice %s notification\n", invoice.ID)

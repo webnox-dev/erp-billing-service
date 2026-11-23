@@ -336,14 +336,15 @@ func (h *InvoiceHandler) SendInvoice(w http.ResponseWriter, r *http.Request) {
 
 	invoice, err := h.service.SendInvoice(withGatewayContext(r), id, req)
 	if err != nil {
-		// Check for specific error types
+		w.Header().Set("Content-Type", "application/json")
+		statusCode := http.StatusInternalServerError
 		if err.Error() == "invoice not found" {
-			http.Error(w, err.Error(), http.StatusNotFound)
+			statusCode = http.StatusNotFound
 		} else if strings.HasPrefix(err.Error(), "cannot send") {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-		} else {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			statusCode = http.StatusBadRequest
 		}
+		w.WriteHeader(statusCode)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
 
