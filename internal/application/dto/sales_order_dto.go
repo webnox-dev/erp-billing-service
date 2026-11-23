@@ -83,6 +83,7 @@ type SalesOrderResponse struct {
 	CustomerID     uuid.UUID           `json:"customer_id"`
 	CustomerName   string              `json:"customer_name,omitempty"`
 	ContactID      *uuid.UUID          `json:"contact_id,omitempty"`
+	SourceSystem   string              `json:"source_system,omitempty"`
 	OrderNumber    *string             `json:"order_number,omitempty"`
 	Subject        string              `json:"subject,omitempty"`
 	OrderDate      time.Time           `json:"order_date"`

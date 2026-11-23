@@ -68,6 +68,9 @@ func (s *InvoiceService) CreateInvoice(ctx context.Context, orgID uuid.UUID, req
 	if req.CustomerID == uuid.Nil {
 		return nil, fmt.Errorf("invalid customer_id: customer is required")
 	}
+	if len(req.Items) == 0 {
+		return nil, fmt.Errorf("validation error: at least one invoice item is required")
+	}
 
 	// Parse source system
 	sourceSystem := domain.SourceSystemManual
@@ -316,6 +319,9 @@ func (s *InvoiceService) CreateInvoice(ctx context.Context, orgID uuid.UUID, req
 	invoice.DiscountTotal = discountTotal
 	invoice.TaxTotal = taxTotal
 	invoice.TotalAmount = subTotal - discountTotal + taxTotal + req.Adjustment + req.ExciseDuty
+	if invoice.TotalAmount <= 0 {
+		return nil, fmt.Errorf("validation error: invoice total amount must be greater than 0")
+	}
 	invoice.PaidAmount = 0
 	invoice.BalanceAmount = invoice.TotalAmount
 
@@ -622,6 +628,9 @@ func (s *InvoiceService) UpdateInvoice(ctx context.Context, id uuid.UUID, req dt
 	if !invoice.CanEdit() {
 		return nil, fmt.Errorf("cannot edit invoice in %s status - only DRAFT invoices can be edited", invoice.Status)
 	}
+	if len(req.Items) == 0 {
+		return nil, fmt.Errorf("validation error: at least one invoice item is required")
+	}
 
 	// 3. Update Fields
 	invoice.Subject = req.Subject
@@ -733,6 +742,9 @@ func (s *InvoiceService) UpdateInvoice(ctx context.Context, id uuid.UUID, req dt
 	invoice.DiscountTotal = discountTotal
 	invoice.TaxTotal = taxTotal
 	invoice.TotalAmount = subTotal - discountTotal + taxTotal + req.Adjustment + req.ExciseDuty
+	if invoice.TotalAmount <= 0 {
+		return nil, fmt.Errorf("validation error: invoice total amount must be greater than 0")
+	}
 	invoice.BalanceAmount = invoice.TotalAmount - invoice.PaidAmount
 
 	if err := s.invoiceRepo.Update(ctx, invoice); err != nil {
@@ -757,6 +769,9 @@ func (s *InvoiceService) SendInvoice(ctx context.Context, id uuid.UUID, req dto.
 	// 2. Lifecycle validation - only DRAFT invoices can be sent
 	if !invoice.CanSend() {
 		return nil, fmt.Errorf("cannot send invoice in %s status - only DRAFT invoices can be sent", invoice.Status)
+	}
+	if len(invoice.Items) == 0 || invoice.TotalAmount <= 0 {
+		return nil, fmt.Errorf("cannot send invoice without items or with zero total amount")
 	}
 
 	// 2b. Validate customer completeness and recipient email before assigning number/PDF/SENT status

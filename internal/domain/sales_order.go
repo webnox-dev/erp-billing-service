@@ -3,6 +3,7 @@ package domain
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -29,6 +30,7 @@ type SalesOrder struct {
 	OrganizationID uuid.UUID        `gorm:"type:uuid;index" json:"organization_id"`
 	CustomerID     uuid.UUID        `gorm:"type:uuid;index" json:"customer_id"`
 	ContactID      *uuid.UUID       `gorm:"type:uuid;index" json:"contact_id"`
+	SourceSystem   SourceSystem     `gorm:"type:varchar(20);index" json:"source_system,omitempty"`
 	OrderNumber    *string          `gorm:"type:varchar(50);unique" json:"order_number"`
 	Subject        string           `gorm:"type:varchar(255)" json:"subject"`
 	OrderDate      time.Time        `json:"order_date"`
@@ -90,6 +92,20 @@ type SalesOrderItem struct {
 
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// NormalizeSalesOrderSourceSystem normalizes UI/API module values to a canonical SourceSystem.
+func NormalizeSalesOrderSourceSystem(raw string) SourceSystem {
+	switch strings.ToUpper(strings.TrimSpace(raw)) {
+	case "CRM":
+		return SourceSystemCRM
+	case "IMS", "INVENTORY":
+		return SourceSystemInventory
+	case "FSM", "EFS":
+		return SourceSystemFSM
+	default:
+		return ""
+	}
 }
 
 // CanEdit returns true if the sales order can be edited
