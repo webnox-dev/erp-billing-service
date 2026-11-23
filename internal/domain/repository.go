@@ -68,6 +68,7 @@ type PaymentRepository interface {
 
 type ReadModelRepository interface {
 	GetCustomer(ctx context.Context, id uuid.UUID) (*CustomerRM, error)
+	UpsertCustomer(ctx context.Context, rm *CustomerRM) error
 	SearchCustomers(ctx context.Context, orgID uuid.UUID, query string) ([]CustomerRM, error)
 	GetItem(ctx context.Context, id uuid.UUID) (*ItemRM, error)
 	SearchItems(ctx context.Context, orgID uuid.UUID, query string) ([]ItemRM, error)

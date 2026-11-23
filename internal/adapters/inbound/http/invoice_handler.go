@@ -96,6 +96,8 @@ func (h *InvoiceHandler) UpdateInvoice(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if err.Error() == "invoice not found" {
 			http.Error(w, err.Error(), http.StatusNotFound)
+		} else if strings.Contains(err.Error(), "validation") || strings.Contains(err.Error(), "cannot edit") {
+			http.Error(w, err.Error(), http.StatusBadRequest)
 		} else {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}

@@ -99,6 +99,14 @@ func (s *SalesOrderService) CreateSalesOrderWithContext(ctx context.Context, req
 	}
 
 	// Create sales order entity
+	sourceSystem := domain.NormalizeSalesOrderSourceSystem(req.SourceSystem)
+	if sourceSystem == "" {
+		sourceSystem = domain.NormalizeSalesOrderSourceSystem(req.Module)
+	}
+	if sourceSystem == "" {
+		sourceSystem = domain.SourceSystemInventory
+	}
+
 	orderID := uuid.New()
 	draftNum := fmt.Sprintf("DRAFT-%s", orderID.String()[:8])
 	salesOrder := &domain.SalesOrder{
@@ -106,6 +114,7 @@ func (s *SalesOrderService) CreateSalesOrderWithContext(ctx context.Context, req
 		OrganizationID:    req.OrganizationID,
 		CustomerID:        req.CustomerID,
 		ContactID:         req.ContactID,
+		SourceSystem:      sourceSystem,
 		OrderNumber:       &draftNum,
 		ServiceCategoryID: req.ServiceCategoryID,
 		PartCategoryID:    req.PartCategoryID,
@@ -181,7 +190,7 @@ func (s *SalesOrderService) CreateSalesOrderWithContext(ctx context.Context, req
 	}
 	s.eventPublisher.Publish(ctx, metadata, event)
 
-	return s.toSalesOrderResponse(withOrgInContext(ctx, salesOrder.OrganizationID), salesOrder), nil
+	return s.toSalesOrderResponseWithCustomerRefresh(withOrgInContext(ctx, salesOrder.OrganizationID), salesOrder, true), nil
 }
 
 // UpdateSalesOrder updates a sales order (only in draft status)
@@ -310,7 +319,7 @@ func (s *SalesOrderService) UpdateSalesOrderWithContext(ctx context.Context, id 
 	}
 	s.eventPublisher.Publish(ctx, metadata, event)
 
-	return s.toSalesOrderResponse(withOrgInContext(ctx, salesOrder.OrganizationID), salesOrder), nil
+	return s.toSalesOrderResponseWithCustomerRefresh(withOrgInContext(ctx, salesOrder.OrganizationID), salesOrder, true), nil
 }
 
 // ConfirmSalesOrder confirms a sales order and generates order number
@@ -490,6 +499,11 @@ func (s *SalesOrderService) CreateInvoiceFromOrder(orderID uuid.UUID) (*dto.Invo
 		ownerID = adminUUID
 	}
 
+	invoiceSourceSystem := salesOrder.SourceSystem
+	if invoiceSourceSystem == "" {
+		invoiceSourceSystem = domain.SourceSystemInventory
+	}
+
 	invoice := &domain.Invoice{
 		ID:             uuid.New(),
 		OrganizationID: salesOrder.OrganizationID,
@@ -497,7 +511,7 @@ func (s *SalesOrderService) CreateInvoiceFromOrder(orderID uuid.UUID) (*dto.Invo
 		ContactID:      salesOrder.ContactID,
 		OwnerID:        ownerID,
 		Subject:        invoiceSubject,
-		SourceSystem:   domain.SourceSystemInventory,
+		SourceSystem:   invoiceSourceSystem,
 		SalesOrderID:   &salesOrder.ID,
 		InvoiceDate:    time.Now(),
 		DueDate:        time.Now().AddDate(0, 0, 30), // 30 days default
@@ -673,7 +687,7 @@ func (s *SalesOrderService) MarkAsShippedWithContext(ctx context.Context, id uui
 	}
 	s.eventPublisher.Publish(ctx, metadata, event)
 
-	return s.toSalesOrderResponse(withOrgInContext(ctx, salesOrder.OrganizationID), salesOrder), nil
+	return s.toSalesOrderResponseWithCustomerRefresh(withOrgInContext(ctx, salesOrder.OrganizationID), salesOrder, true), nil
 }
 
 // MarkAsDelivered marks a sales order as delivered
@@ -722,7 +736,7 @@ func (s *SalesOrderService) MarkAsDeliveredWithContext(ctx context.Context, id u
 	}
 	s.eventPublisher.Publish(ctx, metadata, event)
 
-	return s.toSalesOrderResponse(withOrgInContext(ctx, salesOrder.OrganizationID), salesOrder), nil
+	return s.toSalesOrderResponseWithCustomerRefresh(withOrgInContext(ctx, salesOrder.OrganizationID), salesOrder, true), nil
 }
 
 // DeleteSalesOrder soft-deletes a sales order
@@ -833,7 +847,7 @@ func (s *SalesOrderService) GetSalesOrderWithContext(ctx context.Context, id uui
 		return nil, fmt.Errorf("failed to find sales order: %w", err)
 	}
 	ctxWithOrg := withOrgInContext(ctx, salesOrder.OrganizationID)
-	resp := s.toSalesOrderResponse(ctxWithOrg, salesOrder)
+	resp := s.toSalesOrderResponseWithCustomerRefresh(ctxWithOrg, salesOrder, true)
 	if s.invoiceRepo != nil {
 		if invoices, invErr := s.invoiceRepo.ListBySalesOrderID(ctxWithOrg, id); invErr == nil && len(invoices) > 0 {
 			resp.Invoices = make([]dto.InvoiceSummaryResponse, 0, len(invoices))
@@ -900,40 +914,31 @@ func (s *SalesOrderService) ListSalesOrdersWithContext(ctx context.Context, orgI
 
 // toSalesOrderResponse converts domain entity to DTO
 func (s *SalesOrderService) toSalesOrderResponse(ctx context.Context, salesOrder *domain.SalesOrder) *dto.SalesOrderResponse {
-	ctx = withOrgInContext(ctx, salesOrder.OrganizationID)
-	items := make([]dto.SalesOrderItemDTO, len(salesOrder.Items))
-	for i, item := range salesOrder.Items {
-		items[i] = dto.SalesOrderItemDTO{
-			ID:          &item.ID,
-			ItemID:      item.ItemID,
-			ItemType:    item.ItemType,
-			Name:        item.Name,
-			Description: item.Description,
-			Quantity:    item.Quantity,
-			UnitPrice:   item.UnitPrice,
-			Discount:    item.Discount,
-			Tax:         item.Tax,
-			Total:       item.Total,
-			Metadata:    item.Metadata,
-		}
-	}
+	return s.toSalesOrderResponseWithCustomerRefresh(ctx, salesOrder, false)
+}
 
-	// Fetch customer name from read model and fallback to Customer Service
-	var customerName string
-	var companyName string
-	var customerEmail string
-	var customerPhone string
-	var customerTaxNumber string
-	var subject string
-	var billingStreet, billingCity, billingState, billingCode, billingCountry string
-	var shippingStreet, shippingCity, shippingState, shippingCode, shippingCountry string
-
-	customer, err := s.rmRepo.GetCustomer(ctx, salesOrder.CustomerID)
-	needRemoteCustomer := err != nil || customer == nil || customer.DisplayName == "" || customer.Email == "" || (customer.Phone == "" && customer.PhoneWork == "" && customer.PhoneMobile == "")
+func (s *SalesOrderService) syncAndResolveCustomer(ctx context.Context, customerID uuid.UUID, preferRemote bool) *domain.CustomerRM {
+	customer, err := s.rmRepo.GetCustomer(ctx, customerID)
+	needRemoteCustomer := preferRemote || err != nil || customer == nil || customer.DisplayName == "" || customer.Email == "" || (customer.Phone == "" && customer.PhoneWork == "" && customer.PhoneMobile == "")
 	if needRemoteCustomer && s.customerClient != nil {
-		fmt.Printf("[INFO] SalesOrder customer %s missing or incomplete in ReadModel, fetching from Customer Service\n", salesOrder.CustomerID)
-		if remoteCustomer, remoteErr := s.customerClient.GetCustomer(ctx, salesOrder.CustomerID); remoteErr == nil && remoteCustomer != nil {
-			if customer == nil {
+		if remoteCustomer, remoteErr := s.customerClient.GetCustomer(ctx, customerID); remoteErr == nil && remoteCustomer != nil {
+			if preferRemote || customer == nil {
+				if customer != nil {
+					if remoteCustomer.BillingStreet == "" {
+						remoteCustomer.BillingStreet = customer.BillingStreet
+						remoteCustomer.BillingCity = customer.BillingCity
+						remoteCustomer.BillingState = customer.BillingState
+						remoteCustomer.BillingCode = customer.BillingCode
+						remoteCustomer.BillingCountry = customer.BillingCountry
+					}
+					if remoteCustomer.ShippingStreet == "" {
+						remoteCustomer.ShippingStreet = customer.ShippingStreet
+						remoteCustomer.ShippingCity = customer.ShippingCity
+						remoteCustomer.ShippingState = customer.ShippingState
+						remoteCustomer.ShippingCode = customer.ShippingCode
+						remoteCustomer.ShippingCountry = customer.ShippingCountry
+					}
+				}
 				customer = remoteCustomer
 			} else {
 				if customer.DisplayName == "" {
@@ -941,6 +946,12 @@ func (s *SalesOrderService) toSalesOrderResponse(ctx context.Context, salesOrder
 				}
 				if customer.CompanyName == "" {
 					customer.CompanyName = remoteCustomer.CompanyName
+				}
+				if customer.FirstName == "" {
+					customer.FirstName = remoteCustomer.FirstName
+				}
+				if customer.LastName == "" {
+					customer.LastName = remoteCustomer.LastName
 				}
 				if customer.Email == "" {
 					customer.Email = remoteCustomer.Email
@@ -972,10 +983,44 @@ func (s *SalesOrderService) toSalesOrderResponse(ctx context.Context, salesOrder
 					customer.ShippingCountry = remoteCustomer.ShippingCountry
 				}
 			}
+			_ = s.rmRepo.UpsertCustomer(ctx, customer)
 		} else if remoteErr != nil {
-			fmt.Printf("[WARNING] Failed to fetch customer %s from Customer Service: %v\n", salesOrder.CustomerID, remoteErr)
+			fmt.Printf("[WARNING] Failed to fetch customer %s from Customer Service: %v\n", customerID, remoteErr)
 		}
 	}
+	return customer
+}
+
+func (s *SalesOrderService) toSalesOrderResponseWithCustomerRefresh(ctx context.Context, salesOrder *domain.SalesOrder, preferRemoteCustomer bool) *dto.SalesOrderResponse {
+	ctx = withOrgInContext(ctx, salesOrder.OrganizationID)
+	items := make([]dto.SalesOrderItemDTO, len(salesOrder.Items))
+	for i, item := range salesOrder.Items {
+		items[i] = dto.SalesOrderItemDTO{
+			ID:          &item.ID,
+			ItemID:      item.ItemID,
+			ItemType:    item.ItemType,
+			Name:        item.Name,
+			Description: item.Description,
+			Quantity:    item.Quantity,
+			UnitPrice:   item.UnitPrice,
+			Discount:    item.Discount,
+			Tax:         item.Tax,
+			Total:       item.Total,
+			Metadata:    item.Metadata,
+		}
+	}
+
+	// Fetch customer from read model and prefer/sync authoritative record from Customer Service when requested or incomplete
+	var customerName string
+	var companyName string
+	var customerEmail string
+	var customerPhone string
+	var customerTaxNumber string
+	var subject string
+	var billingStreet, billingCity, billingState, billingCode, billingCountry string
+	var shippingStreet, shippingCity, shippingState, shippingCode, shippingCountry string
+
+	customer := s.syncAndResolveCustomer(ctx, salesOrder.CustomerID, preferRemoteCustomer)
 
 	if customer != nil {
 		customerName = customer.DisplayName
@@ -1096,6 +1141,7 @@ func (s *SalesOrderService) toSalesOrderResponse(ctx context.Context, salesOrder
 		CustomerID:     salesOrder.CustomerID,
 		CustomerName:   customerName,
 		ContactID:      salesOrder.ContactID,
+		SourceSystem:   string(salesOrder.SourceSystem),
 		OrderNumber:    salesOrder.OrderNumber,
 		Subject:        subject,
 		OrderDate:      ConvertToOrgTZValue(ctx, salesOrder.OrderDate, salesOrder.OrganizationID, s.rmRepo),

@@ -135,6 +135,16 @@ func (h *SalesOrderHandler) ListSalesOrders(w http.ResponseWriter, r *http.Reque
 		PageSize: 500,
 	}
 
+	if mod := strings.TrimSpace(r.URL.Query().Get("module")); mod != "" {
+		upperMod := strings.ToUpper(mod)
+		if upperMod == "IMS" {
+			upperMod = "INVENTORY"
+		} else if upperMod == "EFS" {
+			upperMod = "FSM"
+		}
+		filters.Module = &upperMod
+	}
+
 	if page := r.URL.Query().Get("page"); page != "" {
 		if p, err := strconv.Atoi(page); err == nil {
 			filters.Page = p

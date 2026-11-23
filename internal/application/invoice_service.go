@@ -68,6 +68,9 @@ func (s *InvoiceService) CreateInvoice(ctx context.Context, orgID uuid.UUID, req
 	if req.CustomerID == uuid.Nil {
 		return nil, fmt.Errorf("invalid customer_id: customer is required")
 	}
+	if len(req.Items) == 0 {
+		return nil, fmt.Errorf("validation error: at least one invoice item is required")
+	}
 
 	// Parse source system
 	sourceSystem := domain.SourceSystemManual
@@ -111,7 +114,7 @@ func (s *InvoiceService) CreateInvoice(ctx context.Context, orgID uuid.UUID, req
 
 	var customerRM *domain.CustomerRM
 	if billingAddressID == nil || shippingAddressID == nil || serviceAddressID == nil {
-		if customer, err := s.getCustomer(ctxWithOrg, req.CustomerID); err == nil && customer != nil {
+		if customer, err := s.getCustomerWithRefresh(ctxWithOrg, req.CustomerID, true); err == nil && customer != nil {
 			customerRM = customer
 			if billingAddressID == nil {
 				billingAddressID = customer.BillingAddressID
@@ -140,7 +143,7 @@ func (s *InvoiceService) CreateInvoice(ctx context.Context, orgID uuid.UUID, req
 
 	if billingStreet == "" || shippingStreet == "" {
 		if customerRM == nil {
-			if customer, err := s.getCustomer(ctxWithOrg, req.CustomerID); err == nil && customer != nil {
+			if customer, err := s.getCustomerWithRefresh(ctxWithOrg, req.CustomerID, true); err == nil && customer != nil {
 				customerRM = customer
 			}
 		}
@@ -316,6 +319,9 @@ func (s *InvoiceService) CreateInvoice(ctx context.Context, orgID uuid.UUID, req
 	invoice.DiscountTotal = discountTotal
 	invoice.TaxTotal = taxTotal
 	invoice.TotalAmount = subTotal - discountTotal + taxTotal + req.Adjustment + req.ExciseDuty
+	if invoice.TotalAmount <= 0 {
+		return nil, fmt.Errorf("validation error: invoice total amount must be greater than 0")
+	}
 	invoice.PaidAmount = 0
 	invoice.BalanceAmount = invoice.TotalAmount
 
@@ -407,7 +413,7 @@ func (s *InvoiceService) CreateInvoiceFromEstimate(ctx context.Context, orgID uu
 
 	var customerRM *domain.CustomerRM
 	if billingAddressID == nil || shippingAddressID == nil || serviceAddressID == nil {
-		if customer, err := s.getCustomer(ctxWithOrg, req.CustomerID); err == nil && customer != nil {
+		if customer, err := s.getCustomerWithRefresh(ctxWithOrg, req.CustomerID, true); err == nil && customer != nil {
 			customerRM = customer
 			if billingAddressID == nil {
 				billingAddressID = customer.BillingAddressID
@@ -435,7 +441,7 @@ func (s *InvoiceService) CreateInvoiceFromEstimate(ctx context.Context, orgID uu
 
 	if billingStreet == "" || shippingStreet == "" {
 		if customerRM == nil {
-			if customer, err := s.getCustomer(ctxWithOrg, req.CustomerID); err == nil && customer != nil {
+			if customer, err := s.getCustomerWithRefresh(ctxWithOrg, req.CustomerID, true); err == nil && customer != nil {
 				customerRM = customer
 			}
 		}
@@ -622,6 +628,9 @@ func (s *InvoiceService) UpdateInvoice(ctx context.Context, id uuid.UUID, req dt
 	if !invoice.CanEdit() {
 		return nil, fmt.Errorf("cannot edit invoice in %s status - only DRAFT invoices can be edited", invoice.Status)
 	}
+	if len(req.Items) == 0 {
+		return nil, fmt.Errorf("validation error: at least one invoice item is required")
+	}
 
 	// 3. Update Fields
 	invoice.Subject = req.Subject
@@ -733,6 +742,9 @@ func (s *InvoiceService) UpdateInvoice(ctx context.Context, id uuid.UUID, req dt
 	invoice.DiscountTotal = discountTotal
 	invoice.TaxTotal = taxTotal
 	invoice.TotalAmount = subTotal - discountTotal + taxTotal + req.Adjustment + req.ExciseDuty
+	if invoice.TotalAmount <= 0 {
+		return nil, fmt.Errorf("validation error: invoice total amount must be greater than 0")
+	}
 	invoice.BalanceAmount = invoice.TotalAmount - invoice.PaidAmount
 
 	if err := s.invoiceRepo.Update(ctx, invoice); err != nil {
@@ -757,6 +769,9 @@ func (s *InvoiceService) SendInvoice(ctx context.Context, id uuid.UUID, req dto.
 	// 2. Lifecycle validation - only DRAFT invoices can be sent
 	if !invoice.CanSend() {
 		return nil, fmt.Errorf("cannot send invoice in %s status - only DRAFT invoices can be sent", invoice.Status)
+	}
+	if len(invoice.Items) == 0 || invoice.TotalAmount <= 0 {
+		return nil, fmt.Errorf("cannot send invoice without items or with zero total amount")
 	}
 
 	// 2b. Validate customer completeness and recipient email before assigning number/PDF/SENT status
@@ -1458,17 +1473,21 @@ func normalizeCustomerDisplayName(customer *domain.CustomerRM) string {
 }
 
 func (s *InvoiceService) getCustomer(ctx context.Context, id uuid.UUID) (*domain.CustomerRM, error) {
+	return s.getCustomerWithRefresh(ctx, id, false)
+}
+
+func (s *InvoiceService) getCustomerWithRefresh(ctx context.Context, id uuid.UUID, preferRemote bool) (*domain.CustomerRM, error) {
 	customer, err := s.rmRepo.GetCustomer(ctx, id)
 	if customer != nil && customer.DisplayName == "" {
 		customer.DisplayName = normalizeCustomerDisplayName(customer)
 	}
-	if (err != nil || customer == nil || customer.DisplayName == "") && s.customerClient != nil {
-		fmt.Printf("[INFO] Customer %s missing or invalid in ReadModel, fetching from Customer Service\n", id)
+	if (preferRemote || err != nil || customer == nil || customer.DisplayName == "") && s.customerClient != nil {
 		remoteCustomer, remoteErr := s.customerClient.GetCustomer(ctx, id)
 		if remoteErr == nil && remoteCustomer != nil {
 			if remoteCustomer.DisplayName == "" {
 				remoteCustomer.DisplayName = normalizeCustomerDisplayName(remoteCustomer)
 			}
+			_ = s.rmRepo.UpsertCustomer(ctx, remoteCustomer)
 			return remoteCustomer, nil
 		}
 		if remoteErr != nil {
@@ -1551,7 +1570,7 @@ func (s *InvoiceService) getAuthorName(ctx context.Context, invoice *domain.Invo
 func (s *InvoiceService) resolveInvoicePartyDetails(ctx context.Context, invoice *domain.Invoice) (*domain.CustomerRM, *domain.OrganizationRM) {
 	ctxWithOrg := withOrgInContext(ctx, invoice.OrganizationID)
 
-	customer, err := s.getCustomer(ctxWithOrg, invoice.CustomerID)
+	customer, err := s.getCustomerWithRefresh(ctxWithOrg, invoice.CustomerID, true)
 	contact := s.getContactForInvoice(ctxWithOrg, invoice)
 
 	if err != nil || customer == nil {

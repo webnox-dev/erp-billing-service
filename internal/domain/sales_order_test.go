@@ -87,3 +87,24 @@ func TestSalesOrderCalculateTotals(t *testing.T) {
 		t.Fatalf("TotalAmount = %v, want 1062", so.TotalAmount)
 	}
 }
+
+func TestNormalizeSalesOrderSourceSystem(t *testing.T) {
+	cases := []struct {
+		input string
+		want  SourceSystem
+	}{
+		{"crm", SourceSystemCRM},
+		{"CRM", SourceSystemCRM},
+		{"ims", SourceSystemInventory},
+		{"inventory", SourceSystemInventory},
+		{"INVENTORY", SourceSystemInventory},
+		{"efs", SourceSystemFSM},
+		{"fsm", SourceSystemFSM},
+		{"", ""},
+	}
+	for _, tc := range cases {
+		if got := NormalizeSalesOrderSourceSystem(tc.input); got != tc.want {
+			t.Fatalf("NormalizeSalesOrderSourceSystem(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+}

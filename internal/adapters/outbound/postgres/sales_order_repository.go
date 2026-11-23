@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"erp-billing-service/internal/application/dto"
@@ -65,6 +66,21 @@ func (r *SalesOrderRepository) List(orgID uuid.UUID, filters *dto.SalesOrderFilt
 	query := r.db.Where("sales_orders.organization_id = ?", orgID)
 
 	// Apply filters
+	if filters.Module != nil && *filters.Module != "" {
+		mod := strings.ToUpper(strings.TrimSpace(*filters.Module))
+		switch mod {
+		case "CRM":
+			query = query.Where(
+				"(UPPER(sales_orders.source_system) = 'CRM' OR ((sales_orders.source_system IS NULL OR sales_orders.source_system = '') AND (sales_orders.service_category_id IS NOT NULL OR EXISTS (SELECT 1 FROM invoices WHERE invoices.id = sales_orders.invoice_id AND UPPER(invoices.source_system) = 'CRM') OR EXISTS (SELECT 1 FROM sales_order_items soi WHERE soi.sales_order_id = sales_orders.id AND LOWER(soi.item_type) = 'service'))))",
+			)
+		case "INVENTORY", "IMS":
+			query = query.Where(
+				"(UPPER(sales_orders.source_system) = 'INVENTORY' OR ((sales_orders.source_system IS NULL OR sales_orders.source_system = '') AND sales_orders.service_category_id IS NULL AND NOT EXISTS (SELECT 1 FROM invoices WHERE invoices.id = sales_orders.invoice_id AND UPPER(invoices.source_system) = 'CRM') AND NOT EXISTS (SELECT 1 FROM sales_order_items soi WHERE soi.sales_order_id = sales_orders.id AND LOWER(soi.item_type) = 'service')))",
+			)
+		default:
+			query = query.Where("UPPER(sales_orders.source_system) = ?", mod)
+		}
+	}
 	if filters.Status != nil && *filters.Status != "" {
 		query = query.Where("LOWER(sales_orders.status) = LOWER(?)", *filters.Status)
 	}
