@@ -170,6 +170,13 @@ func (so *SalesOrder) CalculateTotals() {
 		so.TaxTotal += item.Tax
 	}
 
+	if so.TDSPercentage > 0 && so.TDSAmount == 0 {
+		so.TDSAmount = (so.SubTotal * so.TDSPercentage) / 100
+	}
+	if so.TCSPercentage > 0 && so.TCSAmount == 0 {
+		so.TCSAmount = (so.SubTotal * so.TCSPercentage) / 100
+	}
+
 	// Total = SubTotal - Discount + Tax - TDS + TCS + Adjustment + ExciseDuty
 	so.TotalAmount = so.SubTotal - so.DiscountTotal + so.TaxTotal - so.TDSAmount + so.TCSAmount + so.Adjustment + so.ExciseDuty
 }

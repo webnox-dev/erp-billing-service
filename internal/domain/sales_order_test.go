@@ -55,3 +55,35 @@ func TestSalesOrderPaidCanDeliverAndTransition(t *testing.T) {
 		}
 	})
 }
+
+func TestSalesOrderCalculateTotals(t *testing.T) {
+	so := &SalesOrder{
+		TDSPercentage: 2,
+		TCSPercentage: 1,
+		Adjustment:    10,
+		Items: []SalesOrderItem{
+			{Quantity: 2, UnitPrice: 500, Discount: 100, Tax: 162},
+		},
+	}
+	so.CalculateTotals()
+
+	if so.SubTotal != 1000 {
+		t.Fatalf("SubTotal = %v, want 1000", so.SubTotal)
+	}
+	if so.DiscountTotal != 100 {
+		t.Fatalf("DiscountTotal = %v, want 100", so.DiscountTotal)
+	}
+	if so.TaxTotal != 162 {
+		t.Fatalf("TaxTotal = %v, want 162", so.TaxTotal)
+	}
+	if so.TDSAmount != 20 {
+		t.Fatalf("TDSAmount = %v, want 20", so.TDSAmount)
+	}
+	if so.TCSAmount != 10 {
+		t.Fatalf("TCSAmount = %v, want 10", so.TCSAmount)
+	}
+	// 1000 - 100 + 162 - 20 + 10 + 10 = 1062
+	if so.TotalAmount != 1062 {
+		t.Fatalf("TotalAmount = %v, want 1062", so.TotalAmount)
+	}
+}
