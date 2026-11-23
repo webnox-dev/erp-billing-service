@@ -115,7 +115,7 @@ func (so *SalesOrder) CanShip() bool {
 
 // CanDeliver returns true if the order can be marked as delivered
 func (so *SalesOrder) CanDeliver() bool {
-	return (so.Status == SalesOrderStatusShipped || so.ShippedDate != nil) && so.DeliveredDate == nil
+	return (so.Status == SalesOrderStatusPaid || so.Status == SalesOrderStatusShipped || so.ShippedDate != nil) && so.DeliveredDate == nil
 }
 
 // CanReturn returns true if the order can have returns created (must be delivered)
@@ -137,7 +137,7 @@ func (so *SalesOrder) CanTransitionTo(newStatus SalesOrderStatus) error {
 		SalesOrderStatusConfirmed:     {SalesOrderStatusInvoiced, SalesOrderStatusCancelled},
 		SalesOrderStatusInvoiced:      {SalesOrderStatusPartiallyPaid, SalesOrderStatusPaid},
 		SalesOrderStatusPartiallyPaid: {SalesOrderStatusPaid},
-		SalesOrderStatusPaid:          {SalesOrderStatusShipped},
+		SalesOrderStatusPaid:          {SalesOrderStatusShipped, SalesOrderStatusDelivered},
 		SalesOrderStatusShipped:       {SalesOrderStatusDelivered, SalesOrderStatusCompleted},
 		SalesOrderStatusDelivered:     {SalesOrderStatusCompleted},
 		SalesOrderStatusCompleted:     {}, // Terminal state

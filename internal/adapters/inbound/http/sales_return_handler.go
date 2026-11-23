@@ -151,24 +151,79 @@ func (h *SalesReturnHandler) GetReturnsBySalesOrder(w http.ResponseWriter, r *ht
 	})
 }
 
+// ApproveReturn handles POST /api/v1/billing/sales-returns/:id/approve
+func (h *SalesReturnHandler) ApproveReturn(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	id, err := uuid.Parse(vars["id"])
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid sales return ID"})
+		return
+	}
+
+	salesReturn, err := h.service.ApproveReturn(id)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(salesReturn)
+}
+
+// CancelReturn handles POST /api/v1/billing/sales-returns/:id/cancel
+func (h *SalesReturnHandler) CancelReturn(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	id, err := uuid.Parse(vars["id"])
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid sales return ID"})
+		return
+	}
+
+	var req dto.CancelReturnRequest
+	_ = json.NewDecoder(r.Body).Decode(&req)
+
+	salesReturn, err := h.service.CancelReturn(id, req.Reason)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(salesReturn)
+}
+
 // ReceiveReturn handles POST /api/v1/sales-returns/:id/receive
 func (h *SalesReturnHandler) ReceiveReturn(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	id, err := uuid.Parse(vars["id"])
 	if err != nil {
-		http.Error(w, "Invalid sales return ID", http.StatusBadRequest)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid sales return ID"})
 		return
 	}
 
 	var req dto.ReceiveReturnRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
 
 	salesReturn, err := h.service.ReceiveReturn(id, &req)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
 

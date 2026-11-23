@@ -698,6 +698,9 @@ func (s *SalesOrderService) MarkAsDeliveredWithContext(ctx context.Context, id u
 	if err := salesOrder.CanTransitionTo(domain.SalesOrderStatusDelivered); err != nil {
 		return nil, err
 	}
+	if salesOrder.ShippedDate == nil {
+		salesOrder.ShippedDate = &req.DeliveredDate
+	}
 	salesOrder.Status = domain.SalesOrderStatusDelivered
 	salesOrder.DeliveredDate = &req.DeliveredDate
 	salesOrder.UpdatedAt = time.Now()
@@ -861,7 +864,7 @@ func (s *SalesOrderService) GetSalesOrderWithContext(ctx context.Context, id uui
 					Adjustment:          inv.Adjustment,
 					TotalAmount:         inv.TotalAmount,
 					PaidAmount:          inv.PaidAmount,
-					BalanceAmount:       inv.BalanceAmount,
+					BalanceAmount:       inv.EffectiveBalance(),
 					OrderBalanceAmount:  inv.OrderBalanceAmount,
 					Method:              method,
 					TransactionID:       txID,

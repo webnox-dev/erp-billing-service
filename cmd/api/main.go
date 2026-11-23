@@ -237,6 +237,8 @@ func main() {
 	api.HandleFunc("/billing/sales-returns", salesReturnHandler.ListSalesReturns).Methods("GET")
 	api.HandleFunc("/billing/sales-returns/{id}", salesReturnHandler.GetSalesReturn).Methods("GET")
 	api.HandleFunc("/billing/sales-orders/{id}/returns", salesReturnHandler.GetReturnsBySalesOrder).Methods("GET")
+	api.HandleFunc("/billing/sales-returns/{id}/approve", salesReturnHandler.ApproveReturn).Methods("POST")
+	api.HandleFunc("/billing/sales-returns/{id}/cancel", salesReturnHandler.CancelReturn).Methods("POST")
 	api.HandleFunc("/billing/sales-returns/{id}/receive", salesReturnHandler.ReceiveReturn).Methods("POST")
 	api.HandleFunc("/billing/sales-returns/{id}/refund", salesReturnHandler.ProcessRefund).Methods("POST")
 

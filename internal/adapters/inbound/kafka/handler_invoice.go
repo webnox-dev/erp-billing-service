@@ -32,10 +32,14 @@ func (h *EventHandler) handleInvoiceEvent(tx *gorm.DB, event *shared_events.Base
 			return err
 		}
 
-		// Update Sales Order status to 'paid' if it is linked to this invoice
-		// We search for SalesOrder where InvoiceID = payload.InvoiceID
+		// Update Sales Order status to 'paid' if it is linked to this invoice and not already shipped/delivered/completed
 		if err := tx.Model(&domain.SalesOrder{}).
-			Where("invoice_id = ?", invoiceID).
+			Where("invoice_id = ? AND status IN ?", invoiceID, []domain.SalesOrderStatus{
+				domain.SalesOrderStatusDraft,
+				domain.SalesOrderStatusConfirmed,
+				domain.SalesOrderStatusInvoiced,
+				domain.SalesOrderStatusPartiallyPaid,
+			}).
 			Update("status", domain.SalesOrderStatusPaid).Error; err != nil {
 			return fmt.Errorf("failed to update sales order status to paid: %w", err)
 		}

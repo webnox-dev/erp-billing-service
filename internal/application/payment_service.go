@@ -225,6 +225,11 @@ func (s *PaymentService) RecordPayment(ctx context.Context, req dto.RecordPaymen
 		return nil, fmt.Errorf("invoice not found")
 	}
 
+	// Recover balance if legacy row has 0 balance_amount despite remaining total_amount - paid_amount
+	if invoice.BalanceAmount <= 0.01 {
+		invoice.BalanceAmount = invoice.EffectiveBalance()
+	}
+
 	// 2. Validate invoice can receive payment
 	if !invoice.CanReceivePayment() {
 		return nil, fmt.Errorf("invoice in %s status cannot receive payments - only SENT invoices can be paid", invoice.Status)
@@ -353,7 +358,14 @@ func (s *PaymentService) RecordPayment(ctx context.Context, req dto.RecordPaymen
 	if invoice.Status == domain.InvoiceStatusPartial {
 		s.publishInvoicePartiallyPaid(invoice)
 		if invoice.SalesOrderID != nil {
-			_ = s.salesOrderRepo.UpdateStatus(ctx, *invoice.SalesOrderID, domain.SalesOrderStatusPartiallyPaid)
+			if so, soErr := s.salesOrderRepo.FindByID(*invoice.SalesOrderID); soErr == nil &&
+				so.Status != domain.SalesOrderStatusPaid &&
+				so.Status != domain.SalesOrderStatusShipped &&
+				so.Status != domain.SalesOrderStatusDelivered &&
+				so.Status != domain.SalesOrderStatusCompleted &&
+				so.Status != domain.SalesOrderStatusCancelled {
+				_ = s.salesOrderRepo.UpdateStatus(ctx, *invoice.SalesOrderID, domain.SalesOrderStatusPartiallyPaid)
+			}
 		}
 	}
 
@@ -361,10 +373,15 @@ func (s *PaymentService) RecordPayment(ctx context.Context, req dto.RecordPaymen
 	if invoice.Status == domain.InvoiceStatusPaid {
 		s.publishInvoicePaid(invoice)
 
-		// Direct update for Sales Order if linked (Inventory/Internal)
+		// Direct update for Sales Order if linked (Inventory/Internal), without regressing shipped/delivered orders
 		if invoice.SalesOrderID != nil {
-			// We update status to paid directly
-			s.salesOrderRepo.UpdateStatus(ctx, *invoice.SalesOrderID, domain.SalesOrderStatusPaid)
+			if so, soErr := s.salesOrderRepo.FindByID(*invoice.SalesOrderID); soErr == nil &&
+				so.Status != domain.SalesOrderStatusShipped &&
+				so.Status != domain.SalesOrderStatusDelivered &&
+				so.Status != domain.SalesOrderStatusCompleted &&
+				so.Status != domain.SalesOrderStatusCancelled {
+				_ = s.salesOrderRepo.UpdateStatus(ctx, *invoice.SalesOrderID, domain.SalesOrderStatusPaid)
+			}
 		}
 	}
 

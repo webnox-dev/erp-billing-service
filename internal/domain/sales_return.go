@@ -11,10 +11,11 @@ import (
 type SalesReturnStatus string
 
 const (
-	SalesReturnStatusDraft    SalesReturnStatus = "draft"
-	SalesReturnStatusApproved SalesReturnStatus = "approved"
-	SalesReturnStatusReceived SalesReturnStatus = "received"
-	SalesReturnStatusRefunded SalesReturnStatus = "refunded"
+	SalesReturnStatusDraft     SalesReturnStatus = "draft"
+	SalesReturnStatusApproved  SalesReturnStatus = "approved"
+	SalesReturnStatusReceived  SalesReturnStatus = "received"
+	SalesReturnStatusRefunded  SalesReturnStatus = "refunded"
+	SalesReturnStatusCancelled SalesReturnStatus = "cancelled"
 )
 
 // SalesReturn represents a return for a sales order
@@ -30,14 +31,17 @@ type SalesReturn struct {
 	ReturnAmount float64 `gorm:"type:decimal(15,2)" json:"return_amount"`
 	
 	// Workflow dates
-	ApprovedDate *time.Time `json:"approved_date,omitempty"`
-	ReceivedDate *time.Time `json:"received_date,omitempty"`
-	RefundedDate *time.Time `json:"refunded_date,omitempty"`
+	ApprovedDate  *time.Time `json:"approved_date,omitempty"`
+	ReceivedDate  *time.Time `json:"received_date,omitempty"`
+	RefundedDate  *time.Time `json:"refunded_date,omitempty"`
+	CancelledDate *time.Time `json:"cancelled_date,omitempty"`
 	
 	// Details
-	ReturnReason   string  `gorm:"type:text" json:"return_reason"`
-	Notes          string  `gorm:"type:text" json:"notes"`
-	ReceivingNotes string  `gorm:"type:text" json:"receiving_notes"`
+	ReturnReason       string  `gorm:"type:text" json:"return_reason"`
+	Notes              string  `gorm:"type:text" json:"notes"`
+	ReceivingNotes     string  `gorm:"type:text" json:"receiving_notes"`
+	CancellationReason string  `gorm:"type:text" json:"cancellation_reason"`
+	StockRestored      bool    `gorm:"default:false" json:"stock_restored"`
 	
 	// References
 	RefundPaymentID *uuid.UUID `gorm:"type:uuid;index" json:"refund_payment_id"`
@@ -90,14 +94,20 @@ func (sr *SalesReturn) CanEdit() bool {
 	return sr.Status == SalesReturnStatusDraft || sr.Status == SalesReturnStatusApproved
 }
 
+// CanCancel returns true if the return can be cancelled (before items are received/refunded)
+func (sr *SalesReturn) CanCancel() bool {
+	return sr.Status == SalesReturnStatusDraft || sr.Status == SalesReturnStatusApproved
+}
+
 // CanTransitionTo validates if the return can transition to the new status
 func (sr *SalesReturn) CanTransitionTo(newStatus SalesReturnStatus) error {
 	// Define valid transitions
 	validTransitions := map[SalesReturnStatus][]SalesReturnStatus{
-		SalesReturnStatusDraft:    {SalesReturnStatusApproved},
-		SalesReturnStatusApproved: {SalesReturnStatusReceived},
-		SalesReturnStatusReceived: {SalesReturnStatusRefunded},
-		SalesReturnStatusRefunded: {}, // Terminal state
+		SalesReturnStatusDraft:     {SalesReturnStatusApproved, SalesReturnStatusCancelled},
+		SalesReturnStatusApproved:  {SalesReturnStatusReceived, SalesReturnStatusCancelled},
+		SalesReturnStatusReceived:  {SalesReturnStatusRefunded},
+		SalesReturnStatusRefunded:  {}, // Terminal state
+		SalesReturnStatusCancelled: {}, // Terminal state
 	}
 
 	allowedStatuses, exists := validTransitions[sr.Status]

@@ -76,6 +76,7 @@ type InvoiceResponse struct {
 	TaxTotal        float64    `json:"tax_total"`
 	TotalAmount     float64    `json:"total_amount"`
 	PaidAmount      float64    `json:"paid_amount"`
+	RefundedAmount  float64    `json:"refunded_amount"`
 	BalanceAmount   float64    `json:"balance_amount"`
 	Adjustment      float64    `json:"adjustment"`
 	ExciseDuty      float64    `json:"excise_duty"`

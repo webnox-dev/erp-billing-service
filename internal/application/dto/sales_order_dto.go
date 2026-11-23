@@ -173,38 +173,55 @@ type CreateSalesReturnRequest struct {
 	ReturnReason   string               `json:"return_reason" validate:"required"`
 	Items          []SalesReturnItemDTO `json:"items" validate:"required,min=1,dive"`
 	Notes          string               `json:"notes"`
+	SaveAsDraft    bool                 `json:"save_as_draft"`
 }
 
 // SalesReturnItemDTO represents a line item in a sales return
 type SalesReturnItemDTO struct {
 	ID               *uuid.UUID `json:"id,omitempty"`
 	SalesOrderItemID uuid.UUID  `json:"sales_order_item_id" validate:"required"`
+	ItemID           *uuid.UUID `json:"item_id,omitempty"`
+	Name             string     `json:"name,omitempty"`
+	Description      string     `json:"description,omitempty"`
 	ReturnedQuantity float64    `json:"returned_quantity" validate:"required,gt=0"`
 	UnitPrice        float64    `json:"unit_price" validate:"required,gte=0"`
 	Tax              float64    `json:"tax"`
 	Total            float64    `json:"total"`
 	Reason           string     `json:"reason"`
+	Condition        string     `json:"condition,omitempty"`
 }
 
 // SalesReturnResponse represents a sales return response
 type SalesReturnResponse struct {
-	ID              uuid.UUID            `json:"id"`
-	OrganizationID  uuid.UUID            `json:"organization_id"`
-	SalesOrderID    uuid.UUID            `json:"sales_order_id"`
-	ReturnNumber    *string              `json:"return_number,omitempty"`
-	ReturnDate      time.Time            `json:"return_date"`
-	Status          string               `json:"status"`
-	ReturnAmount    float64              `json:"return_amount"`
-	ReturnReason    string               `json:"return_reason"`
-	Notes           string               `json:"notes"`
-	ApprovedDate    *time.Time           `json:"approved_date,omitempty"`
-	ReceivedDate    *time.Time           `json:"received_date,omitempty"`
-	ReceivingNotes  string               `json:"receiving_notes"`
-	RefundedDate    *time.Time           `json:"refunded_date,omitempty"`
-	RefundPaymentID *uuid.UUID           `json:"refund_payment_id,omitempty"`
-	Items           []SalesReturnItemDTO `json:"items"`
-	CreatedAt       time.Time            `json:"created_at"`
-	UpdatedAt       time.Time            `json:"updated_at"`
+	ID                 uuid.UUID            `json:"id"`
+	OrganizationID     uuid.UUID            `json:"organization_id"`
+	SalesOrderID       uuid.UUID            `json:"sales_order_id"`
+	SalesOrderNumber   *string              `json:"sales_order_number,omitempty"`
+	CustomerID         *uuid.UUID           `json:"customer_id,omitempty"`
+	CustomerName       string               `json:"customer_name,omitempty"`
+	Currency           string               `json:"currency,omitempty"`
+	ReturnNumber       *string              `json:"return_number,omitempty"`
+	ReturnDate         time.Time            `json:"return_date"`
+	Status             string               `json:"status"`
+	ReturnAmount       float64              `json:"return_amount"`
+	ReturnReason       string               `json:"return_reason"`
+	Notes              string               `json:"notes"`
+	ApprovedDate       *time.Time           `json:"approved_date,omitempty"`
+	ReceivedDate       *time.Time           `json:"received_date,omitempty"`
+	ReceivingNotes     string               `json:"receiving_notes"`
+	RefundedDate       *time.Time           `json:"refunded_date,omitempty"`
+	RefundPaymentID    *uuid.UUID           `json:"refund_payment_id,omitempty"`
+	CancelledDate      *time.Time           `json:"cancelled_date,omitempty"`
+	CancellationReason string               `json:"cancellation_reason,omitempty"`
+	StockRestored      bool                 `json:"stock_restored"`
+	Items              []SalesReturnItemDTO `json:"items"`
+	CreatedAt          time.Time            `json:"created_at"`
+	UpdatedAt          time.Time            `json:"updated_at"`
+}
+
+// CancelReturnRequest represents a request to cancel a sales return
+type CancelReturnRequest struct {
+	Reason string `json:"reason"`
 }
 
 // SalesReturnFilters represents filters for listing sales returns

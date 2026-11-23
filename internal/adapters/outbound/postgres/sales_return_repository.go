@@ -45,7 +45,8 @@ func (r *SalesReturnRepository) FindByID(id uuid.UUID) (*domain.SalesReturn, err
 // FindByReturnNumber retrieves a sales return by return number
 func (r *SalesReturnRepository) FindByReturnNumber(returnNumber string) (*domain.SalesReturn, error) {
 	var salesReturn domain.SalesReturn
-	err := r.db.Preload("Items").First(&salesReturn, "return_number = ?", returnNumber).Error
+	err := r.db.Preload("Items").Preload("Items.SalesOrderItem").Preload("SalesOrder").
+		First(&salesReturn, "return_number = ?", returnNumber).Error
 	if err != nil {
 		return nil, err
 	}
@@ -55,7 +56,8 @@ func (r *SalesReturnRepository) FindByReturnNumber(returnNumber string) (*domain
 // FindBySalesOrderID retrieves all sales returns for a sales order
 func (r *SalesReturnRepository) FindBySalesOrderID(orderID uuid.UUID) ([]*domain.SalesReturn, error) {
 	var salesReturns []*domain.SalesReturn
-	err := r.db.Preload("Items").Where("sales_order_id = ?", orderID).
+	err := r.db.Preload("Items").Preload("Items.SalesOrderItem").Preload("SalesOrder").
+		Where("sales_order_id = ?", orderID).
 		Order("created_at desc").Find(&salesReturns).Error
 	return salesReturns, err
 }
@@ -65,23 +67,27 @@ func (r *SalesReturnRepository) List(orgID uuid.UUID, filters *dto.SalesReturnFi
 	var salesReturns []*domain.SalesReturn
 	var total int64
 
-	query := r.db.Where("organization_id = ?", orgID)
+	query := r.db.Where("sales_returns.organization_id = ?", orgID)
 
 	// Apply filters
 	if filters.Status != nil {
-		query = query.Where("status = ?", *filters.Status)
+		query = query.Where("sales_returns.status = ?", *filters.Status)
 	}
 	if filters.SalesOrderID != nil {
-		query = query.Where("sales_order_id = ?", *filters.SalesOrderID)
+		query = query.Where("sales_returns.sales_order_id = ?", *filters.SalesOrderID)
 	}
 	if filters.FromDate != nil {
-		query = query.Where("return_date >= ?", *filters.FromDate)
+		query = query.Where("sales_returns.return_date >= ?", *filters.FromDate)
 	}
 	if filters.ToDate != nil {
-		query = query.Where("return_date <= ?", *filters.ToDate)
+		query = query.Where("sales_returns.return_date <= ?", *filters.ToDate)
 	}
-	if filters.Search != nil {
-		query = query.Where("return_number LIKE ?", "%"+*filters.Search+"%")
+	if filters.Search != nil && *filters.Search != "" {
+		pattern := "%" + *filters.Search + "%"
+		query = query.Where(
+			"sales_returns.return_number ILIKE ? OR sales_returns.return_reason ILIKE ? OR sales_returns.sales_order_id IN (SELECT id FROM sales_orders WHERE order_number ILIKE ?)",
+			pattern, pattern, pattern,
+		)
 	}
 
 	// Count total
@@ -90,11 +96,14 @@ func (r *SalesReturnRepository) List(orgID uuid.UUID, filters *dto.SalesReturnFi
 	}
 
 	// Apply pagination
-	offset := (filters.Page - 1) * filters.PageSize
-	query = query.Offset(offset).Limit(filters.PageSize)
+	if filters.PageSize > 0 {
+		offset := (filters.Page - 1) * filters.PageSize
+		query = query.Offset(offset).Limit(filters.PageSize)
+	}
 
 	// Fetch returns
-	err := query.Preload("Items").Order("created_at desc").Find(&salesReturns).Error
+	err := query.Preload("Items").Preload("Items.SalesOrderItem").Preload("SalesOrder").
+		Order("sales_returns.created_at desc").Find(&salesReturns).Error
 	return salesReturns, total, err
 }
 

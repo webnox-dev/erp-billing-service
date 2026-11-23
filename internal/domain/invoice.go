@@ -3,6 +3,7 @@ package domain
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/google/uuid"
@@ -61,6 +62,7 @@ type Invoice struct {
 	SalesCommission float64       `gorm:"type:decimal(15,2)" json:"sales_commission"`
 	TotalAmount     float64       `gorm:"type:decimal(15,2)" json:"total_amount"`
 	PaidAmount      float64       `gorm:"type:decimal(15,2);default:0" json:"paid_amount"`
+	RefundedAmount  float64       `gorm:"type:decimal(15,2);default:0" json:"refunded_amount"`
 	BalanceAmount   float64       `gorm:"type:decimal(15,2)" json:"balance_amount"`
 	Currency        string        `gorm:"type:varchar(3);default:'USD'" json:"currency"`
 	Terms           string        `gorm:"type:text" json:"terms"`
@@ -154,15 +156,30 @@ func (i *Invoice) CanTransitionTo(newStatus InvoiceStatus) error {
 	return fmt.Errorf("cannot transition from %s to %s", i.Status, newStatus)
 }
 
-// CanReceivePayment returns true if the invoice can accept payments
-func (i *Invoice) CanReceivePayment() bool {
-	return !i.IsPartialInvoice && i.BalanceAmount > 0.01 && (i.Status == InvoiceStatusSent || i.Status == InvoiceStatusPartial || i.Status == InvoiceStatusOverdue)
+// EffectiveBalance returns the remaining balance due, falling back to TotalAmount - PaidAmount
+// when legacy or synced non-partial invoices have BalanceAmount left at zero.
+func (i *Invoice) EffectiveBalance() float64 {
+	if i.BalanceAmount > 0.01 {
+		return math.Round(i.BalanceAmount*100) / 100
+	}
+	if !i.IsPartialInvoice && (i.Status == InvoiceStatusDraft || i.Status == InvoiceStatusSent || i.Status == InvoiceStatusPartial || i.Status == InvoiceStatusOverdue) {
+		remaining := i.TotalAmount - i.PaidAmount
+		if remaining > 0.01 {
+			return math.Round(remaining*100) / 100
+		}
+	}
+	return i.BalanceAmount
 }
 
-// CanRefund returns true if the invoice can be refunded
-// Only PAID non-partial invoices can be refunded
+// CanReceivePayment returns true if the invoice can accept payments
+func (i *Invoice) CanReceivePayment() bool {
+	return !i.IsPartialInvoice && i.EffectiveBalance() > 0.01 && (i.Status == InvoiceStatusSent || i.Status == InvoiceStatusPartial || i.Status == InvoiceStatusOverdue)
+}
+
+// CanRefund returns true if the invoice has paid amount available for refund
+// Only non-partial invoices with recorded payment balance can be refunded
 func (i *Invoice) CanRefund() bool {
-	return !i.IsPartialInvoice && i.Status == InvoiceStatusPaid
+	return !i.IsPartialInvoice && (i.Status == InvoiceStatusPaid || i.Status == InvoiceStatusPartial) && i.PaidAmount > 0
 }
 
 // CalculateStatus derives the invoice status based on payment amounts

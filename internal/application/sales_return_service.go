@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math"
+	"strings"
 	"time"
 
 	"erp-billing-service/internal/application/dto"
@@ -106,10 +108,13 @@ func (s *SalesReturnService) CreateSalesReturn(req *dto.CreateSalesReturnRequest
 	// Calculate totals
 	salesReturn.CalculateTotals()
 
-	// Retrieve existing sales returns for this sales order to account for previous returns
+	// Retrieve existing sales returns for this sales order to account for previous non-cancelled returns
 	existingReturns, _ := s.salesReturnRepo.FindBySalesOrderID(req.SalesOrderID)
 	returnedMap := make(map[uuid.UUID]float64)
 	for _, ret := range existingReturns {
+		if ret.Status == domain.SalesReturnStatusCancelled {
+			continue
+		}
 		for _, item := range ret.Items {
 			returnedMap[item.SalesOrderItemID] += item.ReturnedQuantity
 		}
@@ -132,19 +137,28 @@ func (s *SalesReturnService) CreateSalesReturn(req *dto.CreateSalesReturnRequest
 		return nil, fmt.Errorf("validation failed: %w", err)
 	}
 
-	// Generate return number and approve immediately
+	// Generate return number
 	returnNumber, err := s.salesReturnRepo.GenerateReturnNumber(salesReturn.OrganizationID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate return number: %w", err)
 	}
 	salesReturn.ReturnNumber = &returnNumber
-	salesReturn.Status = domain.SalesReturnStatusApproved
-	approvedDate := time.Now()
-	salesReturn.ApprovedDate = &approvedDate
+	if req.SaveAsDraft {
+		salesReturn.Status = domain.SalesReturnStatusDraft
+	} else {
+		salesReturn.Status = domain.SalesReturnStatusApproved
+		approvedDate := time.Now()
+		salesReturn.ApprovedDate = &approvedDate
+	}
 
 	// Save to database
 	if err := s.salesReturnRepo.Create(salesReturn); err != nil {
 		return nil, fmt.Errorf("failed to create sales return: %w", err)
+	}
+
+	// Reload so items carry SalesOrderItem details in response
+	if reloaded, rErr := s.salesReturnRepo.FindByID(salesReturn.ID); rErr == nil && reloaded != nil {
+		salesReturn = reloaded
 	}
 
 	// Publish events
@@ -159,7 +173,117 @@ func (s *SalesReturnService) CreateSalesReturn(req *dto.CreateSalesReturnRequest
 	return s.toSalesReturnResponse(salesReturn), nil
 }
 
-// ReceiveReturn marks a sales return as received
+// ApproveReturn transitions a draft sales return request to approved
+func (s *SalesReturnService) ApproveReturn(id uuid.UUID) (*dto.SalesReturnResponse, error) {
+	salesReturn, err := s.salesReturnRepo.FindByID(id)
+	if err != nil {
+		return nil, fmt.Errorf("failed to find sales return: %w", err)
+	}
+	if !salesReturn.CanApprove() {
+		return nil, fmt.Errorf("cannot approve sales return in %s status", salesReturn.Status)
+	}
+	if err := salesReturn.CanTransitionTo(domain.SalesReturnStatusApproved); err != nil {
+		return nil, err
+	}
+	if salesReturn.ReturnNumber == nil || *salesReturn.ReturnNumber == "" {
+		returnNumber, genErr := s.salesReturnRepo.GenerateReturnNumber(salesReturn.OrganizationID)
+		if genErr != nil {
+			return nil, fmt.Errorf("failed to generate return number: %w", genErr)
+		}
+		salesReturn.ReturnNumber = &returnNumber
+	}
+	now := time.Now()
+	salesReturn.Status = domain.SalesReturnStatusApproved
+	salesReturn.ApprovedDate = &now
+	salesReturn.UpdatedAt = now
+
+	if err := s.salesReturnRepo.Update(salesReturn); err != nil {
+		return nil, fmt.Errorf("failed to approve sales return: %w", err)
+	}
+	return s.toSalesReturnResponse(salesReturn), nil
+}
+
+// CancelReturn cancels a draft or approved sales return before items are received/refunded
+func (s *SalesReturnService) CancelReturn(id uuid.UUID, reason string) (*dto.SalesReturnResponse, error) {
+	salesReturn, err := s.salesReturnRepo.FindByID(id)
+	if err != nil {
+		return nil, fmt.Errorf("failed to find sales return: %w", err)
+	}
+	if !salesReturn.CanCancel() {
+		return nil, fmt.Errorf("cannot cancel sales return in %s status", salesReturn.Status)
+	}
+	if err := salesReturn.CanTransitionTo(domain.SalesReturnStatusCancelled); err != nil {
+		return nil, err
+	}
+	now := time.Now()
+	salesReturn.Status = domain.SalesReturnStatusCancelled
+	salesReturn.CancelledDate = &now
+	salesReturn.CancellationReason = strings.TrimSpace(reason)
+	salesReturn.UpdatedAt = now
+
+	if err := s.salesReturnRepo.Update(salesReturn); err != nil {
+		return nil, fmt.Errorf("failed to cancel sales return: %w", err)
+	}
+	return s.toSalesReturnResponse(salesReturn), nil
+}
+
+func (s *SalesReturnService) restoreStockForReturn(salesReturn *domain.SalesReturn, salesOrder *domain.SalesOrder) error {
+	if s.inventoryClient == nil || salesReturn.StockRestored || salesOrder == nil {
+		return nil
+	}
+
+	goodOrOpenedItems := make([]outbound.StockCheckItem, 0)
+	damagedItems := make([]outbound.StockCheckItem, 0)
+
+	orderItemsByID := make(map[uuid.UUID]domain.SalesOrderItem, len(salesOrder.Items))
+	for _, soItem := range salesOrder.Items {
+		orderItemsByID[soItem.ID] = soItem
+	}
+
+	for _, returnItem := range salesReturn.Items {
+		soItem, ok := orderItemsByID[returnItem.SalesOrderItemID]
+		if !ok || soItem.ItemID == uuid.Nil {
+			continue
+		}
+		itemTypeLower := strings.ToLower(strings.TrimSpace(soItem.ItemType))
+		if itemTypeLower == "service" {
+			continue
+		}
+		qty := int32(math.Round(returnItem.ReturnedQuantity))
+		if qty <= 0 {
+			continue
+		}
+		entry := outbound.StockCheckItem{
+			ItemID:   soItem.ItemID.String(),
+			Quantity: qty,
+		}
+		if strings.EqualFold(strings.TrimSpace(returnItem.Reason), "damaged") {
+			damagedItems = append(damagedItems, entry)
+		} else {
+			goodOrOpenedItems = append(goodOrOpenedItems, entry)
+		}
+	}
+
+	notesLabel := "Sales Return Received"
+	if salesReturn.ReturnNumber != nil && *salesReturn.ReturnNumber != "" {
+		notesLabel = fmt.Sprintf("Sales Return %s Received", *salesReturn.ReturnNumber)
+	}
+
+	if len(goodOrOpenedItems) > 0 {
+		if err := s.inventoryClient.UpdateStock(context.Background(), goodOrOpenedItems, "return", "sales_return", salesReturn.ID.String(), notesLabel); err != nil {
+			return fmt.Errorf("failed to restore sellable stock for sales return: %w", err)
+		}
+	}
+	if len(damagedItems) > 0 {
+		if err := s.inventoryClient.UpdateStock(context.Background(), damagedItems, "damaged_return", "sales_return", salesReturn.ID.String(), notesLabel+" (Damaged)"); err != nil {
+			return fmt.Errorf("failed to record damaged stock for sales return: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// ReceiveReturn marks a sales return as received and updates inventory stock
 func (s *SalesReturnService) ReceiveReturn(id uuid.UUID, req *dto.ReceiveReturnRequest) (*dto.SalesReturnResponse, error) {
 	// Retrieve return
 	salesReturn, err := s.salesReturnRepo.FindByID(id)
@@ -176,6 +300,16 @@ func (s *SalesReturnService) ReceiveReturn(id uuid.UUID, req *dto.ReceiveReturnR
 	if err := salesReturn.CanTransitionTo(domain.SalesReturnStatusReceived); err != nil {
 		return nil, err
 	}
+
+	// Retrieve sales order to resolve item IDs and item types for stock update
+	salesOrder, soErr := s.salesOrderRepo.FindByID(salesReturn.SalesOrderID)
+	if soErr == nil && salesOrder != nil {
+		if stockErr := s.restoreStockForReturn(salesReturn, salesOrder); stockErr != nil {
+			return nil, stockErr
+		}
+		salesReturn.StockRestored = true
+	}
+
 	salesReturn.Status = domain.SalesReturnStatusReceived
 	salesReturn.ReceivedDate = &req.ReceivedDate
 	salesReturn.ReceivingNotes = req.ReceivingNotes
@@ -214,7 +348,7 @@ func (s *SalesReturnService) ProcessRefund(id uuid.UUID, req *dto.ProcessRefundR
 		return nil, fmt.Errorf("cannot process refund for sales return in %s status or refund already processed", salesReturn.Status)
 	}
 
-	// Retrieve sales order to get items for stock update later
+	// Retrieve sales order to get items and fallback invoice link
 	salesOrder, err := s.salesOrderRepo.FindByID(salesReturn.SalesOrderID)
 	if err != nil {
 		fmt.Printf("[ERROR] Failed to find sales order: %v\n", err)
@@ -222,19 +356,16 @@ func (s *SalesReturnService) ProcessRefund(id uuid.UUID, req *dto.ProcessRefundR
 	}
 	fmt.Printf("[DEBUG] Sales order found: id=%s\n", salesOrder.ID)
 
-	// Find the paid invoice for this sales order.
-	// A sales order may have multiple invoices; we look up by sales_order_id on the invoices
-	// table rather than relying on the single sales_orders.invoice_id pointer, which only
-	// tracks the most-recently-linked invoice.
+	// Find an eligible paid invoice for this sales order
 	invoices, err := s.invoiceRepo.ListBySalesOrderID(context.Background(), salesReturn.SalesOrderID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to look up invoices for sales order: %w", err)
 	}
 
-	// Find the PAID non-partial invoice among all linked invoices
+	const epsilon = 0.01
 	var invoice *domain.Invoice
 	for i := range invoices {
-		if !invoices[i].IsPartialInvoice && invoices[i].CanRefund() {
+		if !invoices[i].IsPartialInvoice && invoices[i].CanRefund() && invoices[i].PaidAmount+epsilon >= salesReturn.ReturnAmount {
 			invoice = &invoices[i]
 			break
 		}
@@ -244,23 +375,23 @@ func (s *SalesReturnService) ProcessRefund(id uuid.UUID, req *dto.ProcessRefundR
 		// Friendly fallback: try the sales order's direct invoice_id pointer if set
 		if salesOrder.InvoiceID != nil {
 			fallback, ferr := s.invoiceRepo.GetByID(context.Background(), *salesOrder.InvoiceID)
-			if ferr == nil && fallback != nil && fallback.CanRefund() {
+			if ferr == nil && fallback != nil && fallback.CanRefund() && fallback.PaidAmount+epsilon >= salesReturn.ReturnAmount {
 				invoice = fallback
 			}
 		}
 	}
 
 	if invoice == nil {
-		if len(invoices) == 0 {
+		if len(invoices) == 0 && salesOrder.InvoiceID == nil {
 			return nil, fmt.Errorf("no invoices found for this sales order — cannot process refund")
 		}
 		return nil, fmt.Errorf(
-			"no paid invoice found for this sales order (found %d invoice(s), none in PAID status) — payment must be recorded on an invoice before a refund can be processed",
-			len(invoices),
+			"no eligible paid invoice found with sufficient refundable amount (%.2f) for this sales order — payment must be recorded before a refund can be processed",
+			salesReturn.ReturnAmount,
 		)
 	}
 
-	fmt.Printf("[DEBUG] Found paid invoice for refund: id=%s, status=%s\n", invoice.ID, invoice.Status)
+	fmt.Printf("[DEBUG] Found paid invoice for refund: id=%s, status=%s, paid=%.2f\n", invoice.ID, invoice.Status, invoice.PaidAmount)
 
 	// Create refund payment (negative amount)
 	refundPayment := &domain.Payment{
@@ -284,12 +415,22 @@ func (s *SalesReturnService) ProcessRefund(id uuid.UUID, req *dto.ProcessRefundR
 		return nil, fmt.Errorf("failed to create refund payment: %w", err)
 	}
 
-	// Update invoice balance
-	invoice.PaidAmount -= salesReturn.ReturnAmount
-	invoice.BalanceAmount += salesReturn.ReturnAmount
+	// Update invoice refunded & net paid revenue figures without inflating unpaid balance
+	invoice.RefundedAmount = roundCurrency(invoice.RefundedAmount + salesReturn.ReturnAmount)
+	invoice.PaidAmount = math.Max(0, roundCurrency(invoice.PaidAmount-salesReturn.ReturnAmount))
+	invoice.PDFPath = nil
 	invoice.UpdatedAt = time.Now()
 	if err := s.invoiceRepo.Update(context.Background(), invoice); err != nil {
 		return nil, fmt.Errorf("failed to update invoice: %w", err)
+	}
+
+	// Restore stock only if not already restored on ReceiveReturn
+	if !salesReturn.StockRestored {
+		if stockErr := s.restoreStockForReturn(salesReturn, salesOrder); stockErr != nil {
+			fmt.Printf("sales return refunded but failed to update stock: %v\n", stockErr)
+		} else {
+			salesReturn.StockRestored = true
+		}
 	}
 
 	// Update sales return
@@ -305,43 +446,6 @@ func (s *SalesReturnService) ProcessRefund(id uuid.UUID, req *dto.ProcessRefundR
 	// Save
 	if err := s.salesReturnRepo.Update(salesReturn); err != nil {
 		return nil, fmt.Errorf("failed to update sales return: %w", err)
-	}
-
-	// Update stock (Increase)
-	if s.inventoryClient != nil {
-		stockItems := make([]outbound.StockCheckItem, 0)
-		// Based on `CreateSalesReturn` (lines 69-83), it only maps `SalesOrderItemID`.
-		// It assumes `SalesReturnItem` struct has `SalesOrderItemID` but maybe not `ItemID`.
-		// If I cannot get ItemID easily, I have to fetch SalesOrder items again.
-		// I have `salesOrder` in `ProcessRefund`.
-		// I can map SalesOrderItemID -> ItemID using `salesOrder.Items`.
-		// Let's do that.
-
-		for _, returnItem := range salesReturn.Items {
-			var itemID string
-			// Find corresponding item in salesOrder
-			for _, soItem := range salesOrder.Items {
-				if soItem.ID == returnItem.SalesOrderItemID {
-					itemID = soItem.ItemID.String()
-					break
-				}
-			}
-			if itemID != "" {
-				stockItems = append(stockItems, outbound.StockCheckItem{
-					ItemID:   itemID,
-					Quantity: int32(returnItem.ReturnedQuantity),
-				})
-			}
-		}
-
-		if len(stockItems) > 0 {
-			// TransactionType: 'return', ReferenceType: 'sales_return'
-			err := s.inventoryClient.UpdateStock(context.Background(), stockItems, "return", "sales_return", salesReturn.ID.String(), "Sales Return Refunded")
-			if err != nil {
-				// Log warning
-				fmt.Printf("sales return refunded but failed to update stock: %v\n", err)
-			}
-		}
 	}
 
 	// Publish events
@@ -404,9 +508,11 @@ func (s *SalesReturnService) GetReturnsBySalesOrder(orderID uuid.UUID) ([]*dto.S
 
 // toSalesReturnResponse converts domain entity to DTO
 func (s *SalesReturnService) toSalesReturnResponse(salesReturn *domain.SalesReturn) *dto.SalesReturnResponse {
+	ctxWithOrg := withOrgInContext(context.Background(), salesReturn.OrganizationID)
+
 	items := make([]dto.SalesReturnItemDTO, len(salesReturn.Items))
 	for i, item := range salesReturn.Items {
-		items[i] = dto.SalesReturnItemDTO{
+		itemDTO := dto.SalesReturnItemDTO{
 			ID:               &item.ID,
 			SalesOrderItemID: item.SalesOrderItemID,
 			ReturnedQuantity: item.ReturnedQuantity,
@@ -414,26 +520,74 @@ func (s *SalesReturnService) toSalesReturnResponse(salesReturn *domain.SalesRetu
 			Tax:              item.Tax,
 			Total:            item.Total,
 			Reason:           item.Reason,
+			Condition:        item.Reason,
+		}
+		if item.SalesOrderItem != nil {
+			itemID := item.SalesOrderItem.ItemID
+			itemDTO.ItemID = &itemID
+			itemDTO.Name = item.SalesOrderItem.Name
+			itemDTO.Description = item.SalesOrderItem.Description
+		}
+		items[i] = itemDTO
+	}
+
+	var orderNumber *string
+	var customerID *uuid.UUID
+	var customerName string
+	so := salesReturn.SalesOrder
+	if so == nil && s.salesOrderRepo != nil {
+		if fetched, err := s.salesOrderRepo.FindByID(salesReturn.SalesOrderID); err == nil {
+			so = fetched
+		}
+	}
+	if so != nil {
+		orderNumber = so.OrderNumber
+		cid := so.CustomerID
+		customerID = &cid
+		if s.rmRepo != nil {
+			if cust, err := s.rmRepo.GetCustomer(ctxWithOrg, so.CustomerID); err == nil && cust != nil {
+				customerName = cust.DisplayName
+				if customerName == "" {
+					customerName = strings.TrimSpace(cust.FirstName + " " + cust.LastName)
+				}
+				if customerName == "" {
+					customerName = cust.CompanyName
+				}
+			}
+		}
+	}
+
+	currency := ""
+	if s.rmRepo != nil {
+		if org, err := s.rmRepo.GetOrganization(ctxWithOrg, salesReturn.OrganizationID); err == nil && org != nil {
+			currency = org.Currency
 		}
 	}
 
 	return &dto.SalesReturnResponse{
-		ID:              salesReturn.ID,
-		OrganizationID:  salesReturn.OrganizationID,
-		SalesOrderID:    salesReturn.SalesOrderID,
-		ReturnNumber:    salesReturn.ReturnNumber,
-		ReturnDate:      ConvertToOrgTZValue(context.Background(), salesReturn.ReturnDate, salesReturn.OrganizationID, s.rmRepo),
-		Status:          string(salesReturn.Status),
-		ReturnAmount:    salesReturn.ReturnAmount,
-		ReturnReason:    salesReturn.ReturnReason,
-		Notes:           salesReturn.Notes,
-		ApprovedDate:    ConvertToOrgTZ(context.Background(), salesReturn.ApprovedDate, salesReturn.OrganizationID, s.rmRepo),
-		ReceivedDate:    ConvertToOrgTZ(context.Background(), salesReturn.ReceivedDate, salesReturn.OrganizationID, s.rmRepo),
-		ReceivingNotes:  salesReturn.ReceivingNotes,
-		RefundedDate:    ConvertToOrgTZ(context.Background(), salesReturn.RefundedDate, salesReturn.OrganizationID, s.rmRepo),
-		RefundPaymentID: salesReturn.RefundPaymentID,
-		Items:           items,
-		CreatedAt:       ConvertToOrgTZValue(context.Background(), salesReturn.CreatedAt, salesReturn.OrganizationID, s.rmRepo),
-		UpdatedAt:       ConvertToOrgTZValue(context.Background(), salesReturn.UpdatedAt, salesReturn.OrganizationID, s.rmRepo),
+		ID:                 salesReturn.ID,
+		OrganizationID:     salesReturn.OrganizationID,
+		SalesOrderID:       salesReturn.SalesOrderID,
+		SalesOrderNumber:   orderNumber,
+		CustomerID:         customerID,
+		CustomerName:       customerName,
+		Currency:           currency,
+		ReturnNumber:       salesReturn.ReturnNumber,
+		ReturnDate:         ConvertToOrgTZValue(ctxWithOrg, salesReturn.ReturnDate, salesReturn.OrganizationID, s.rmRepo),
+		Status:             string(salesReturn.Status),
+		ReturnAmount:       salesReturn.ReturnAmount,
+		ReturnReason:       salesReturn.ReturnReason,
+		Notes:              salesReturn.Notes,
+		ApprovedDate:       ConvertToOrgTZ(ctxWithOrg, salesReturn.ApprovedDate, salesReturn.OrganizationID, s.rmRepo),
+		ReceivedDate:       ConvertToOrgTZ(ctxWithOrg, salesReturn.ReceivedDate, salesReturn.OrganizationID, s.rmRepo),
+		ReceivingNotes:     salesReturn.ReceivingNotes,
+		RefundedDate:       ConvertToOrgTZ(ctxWithOrg, salesReturn.RefundedDate, salesReturn.OrganizationID, s.rmRepo),
+		RefundPaymentID:    salesReturn.RefundPaymentID,
+		CancelledDate:      ConvertToOrgTZ(ctxWithOrg, salesReturn.CancelledDate, salesReturn.OrganizationID, s.rmRepo),
+		CancellationReason: salesReturn.CancellationReason,
+		StockRestored:      salesReturn.StockRestored,
+		Items:              items,
+		CreatedAt:          ConvertToOrgTZValue(ctxWithOrg, salesReturn.CreatedAt, salesReturn.OrganizationID, s.rmRepo),
+		UpdatedAt:          ConvertToOrgTZValue(ctxWithOrg, salesReturn.UpdatedAt, salesReturn.OrganizationID, s.rmRepo),
 	}
 }
