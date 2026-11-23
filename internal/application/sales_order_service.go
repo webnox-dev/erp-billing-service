@@ -51,6 +51,11 @@ func NewSalesOrderService(
 
 // CreateSalesOrder creates a new sales order in draft status
 func (s *SalesOrderService) CreateSalesOrder(req *dto.CreateSalesOrderRequest) (*dto.SalesOrderResponse, error) {
+	return s.CreateSalesOrderWithContext(context.Background(), req)
+}
+
+// CreateSalesOrderWithContext creates a new sales order in draft status using request context
+func (s *SalesOrderService) CreateSalesOrderWithContext(ctx context.Context, req *dto.CreateSalesOrderRequest) (*dto.SalesOrderResponse, error) {
 	// Subscription limit validation
 	subClient := validation.NewSubscriptionClient()
 	if subClient != nil && req.OrganizationID != uuid.Nil {
@@ -174,13 +179,18 @@ func (s *SalesOrderService) CreateSalesOrder(req *dto.CreateSalesOrderRequest) (
 		TotalAmount:  salesOrder.TotalAmount,
 		Status:       string(salesOrder.Status),
 	}
-	s.eventPublisher.Publish(context.Background(), metadata, event)
+	s.eventPublisher.Publish(ctx, metadata, event)
 
-	return s.toSalesOrderResponse(context.Background(), salesOrder), nil
+	return s.toSalesOrderResponse(withOrgInContext(ctx, salesOrder.OrganizationID), salesOrder), nil
 }
 
 // UpdateSalesOrder updates a sales order (only in draft status)
 func (s *SalesOrderService) UpdateSalesOrder(id uuid.UUID, req *dto.UpdateSalesOrderRequest) (*dto.SalesOrderResponse, error) {
+	return s.UpdateSalesOrderWithContext(context.Background(), id, req)
+}
+
+// UpdateSalesOrderWithContext updates a sales order (only in draft status) using request context
+func (s *SalesOrderService) UpdateSalesOrderWithContext(ctx context.Context, id uuid.UUID, req *dto.UpdateSalesOrderRequest) (*dto.SalesOrderResponse, error) {
 	// Retrieve existing order
 	salesOrder, err := s.salesOrderRepo.FindByID(id)
 	if err != nil {
@@ -298,13 +308,18 @@ func (s *SalesOrderService) UpdateSalesOrder(id uuid.UUID, req *dto.UpdateSalesO
 	event := domain.SalesOrderUpdatedEvent{
 		SalesOrderID: salesOrder.ID.String(),
 	}
-	s.eventPublisher.Publish(context.Background(), metadata, event)
+	s.eventPublisher.Publish(ctx, metadata, event)
 
-	return s.toSalesOrderResponse(context.Background(), salesOrder), nil
+	return s.toSalesOrderResponse(withOrgInContext(ctx, salesOrder.OrganizationID), salesOrder), nil
 }
 
 // ConfirmSalesOrder confirms a sales order and generates order number
 func (s *SalesOrderService) ConfirmSalesOrder(id uuid.UUID) (*dto.SalesOrderResponse, error) {
+	return s.ConfirmSalesOrderWithContext(context.Background(), id)
+}
+
+// ConfirmSalesOrderWithContext confirms a sales order and generates order number using request context
+func (s *SalesOrderService) ConfirmSalesOrderWithContext(ctx context.Context, id uuid.UUID) (*dto.SalesOrderResponse, error) {
 	// Retrieve order
 	salesOrder, err := s.salesOrderRepo.FindByID(id)
 	if err != nil {
@@ -370,11 +385,26 @@ func (s *SalesOrderService) ConfirmSalesOrder(id uuid.UUID) (*dto.SalesOrderResp
 	s.eventPublisher.Publish(context.Background(), metadata, event)
 
 	// Send confirmation email with PDF attachment to customer
-	customer, _ := s.rmRepo.GetCustomer(context.Background(), salesOrder.CustomerID)
-	org, _ := s.rmRepo.GetOrganization(context.Background(), salesOrder.OrganizationID)
-	_ = s.sendSalesOrderNotification(context.Background(), salesOrder, customer, org)
+	ctxWithOrg := withOrgInContext(ctx, salesOrder.OrganizationID)
+	customer, _ := s.rmRepo.GetCustomer(ctxWithOrg, salesOrder.CustomerID)
+	if (customer == nil || customer.DisplayName == "" || customer.Email == "") && s.customerClient != nil {
+		if remoteCustomer, remoteErr := s.customerClient.GetCustomer(ctxWithOrg, salesOrder.CustomerID); remoteErr == nil && remoteCustomer != nil {
+			if customer == nil {
+				customer = remoteCustomer
+			} else {
+				if customer.DisplayName == "" {
+					customer.DisplayName = remoteCustomer.DisplayName
+				}
+				if customer.Email == "" {
+					customer.Email = remoteCustomer.Email
+				}
+			}
+		}
+	}
+	org, _ := s.rmRepo.GetOrganization(ctxWithOrg, salesOrder.OrganizationID)
+	_ = s.sendSalesOrderNotification(ctxWithOrg, salesOrder, customer, org)
 
-	return s.toSalesOrderResponse(context.Background(), salesOrder), nil
+	return s.toSalesOrderResponse(ctxWithOrg, salesOrder), nil
 }
 
 // CreateInvoiceFromOrder creates an invoice from a confirmed sales order
@@ -602,6 +632,11 @@ func (s *SalesOrderService) CreateInvoiceFromOrder(orderID uuid.UUID) (*dto.Invo
 
 // MarkAsShipped marks a sales order as shipped
 func (s *SalesOrderService) MarkAsShipped(id uuid.UUID, req *dto.MarkAsShippedRequest) (*dto.SalesOrderResponse, error) {
+	return s.MarkAsShippedWithContext(context.Background(), id, req)
+}
+
+// MarkAsShippedWithContext marks a sales order as shipped using request context
+func (s *SalesOrderService) MarkAsShippedWithContext(ctx context.Context, id uuid.UUID, req *dto.MarkAsShippedRequest) (*dto.SalesOrderResponse, error) {
 	// Retrieve order
 	salesOrder, err := s.salesOrderRepo.FindByID(id)
 	if err != nil {
@@ -636,13 +671,18 @@ func (s *SalesOrderService) MarkAsShipped(id uuid.UUID, req *dto.MarkAsShippedRe
 		SalesOrderID: salesOrder.ID.String(),
 		ShippedDate:  req.ShippedDate,
 	}
-	s.eventPublisher.Publish(context.Background(), metadata, event)
+	s.eventPublisher.Publish(ctx, metadata, event)
 
-	return s.toSalesOrderResponse(context.Background(), salesOrder), nil
+	return s.toSalesOrderResponse(withOrgInContext(ctx, salesOrder.OrganizationID), salesOrder), nil
 }
 
 // MarkAsDelivered marks a sales order as delivered
 func (s *SalesOrderService) MarkAsDelivered(id uuid.UUID, req *dto.MarkAsDeliveredRequest) (*dto.SalesOrderResponse, error) {
+	return s.MarkAsDeliveredWithContext(context.Background(), id, req)
+}
+
+// MarkAsDeliveredWithContext marks a sales order as delivered using request context
+func (s *SalesOrderService) MarkAsDeliveredWithContext(ctx context.Context, id uuid.UUID, req *dto.MarkAsDeliveredRequest) (*dto.SalesOrderResponse, error) {
 	// Retrieve order
 	salesOrder, err := s.salesOrderRepo.FindByID(id)
 	if err != nil {
@@ -677,9 +717,9 @@ func (s *SalesOrderService) MarkAsDelivered(id uuid.UUID, req *dto.MarkAsDeliver
 		SalesOrderID:  salesOrder.ID.String(),
 		DeliveredDate: req.DeliveredDate,
 	}
-	s.eventPublisher.Publish(context.Background(), metadata, event)
+	s.eventPublisher.Publish(ctx, metadata, event)
 
-	return s.toSalesOrderResponse(context.Background(), salesOrder), nil
+	return s.toSalesOrderResponse(withOrgInContext(ctx, salesOrder.OrganizationID), salesOrder), nil
 }
 
 // DeleteSalesOrder soft-deletes a sales order
@@ -780,13 +820,19 @@ func (s *SalesOrderService) CancelSalesOrder(id uuid.UUID, reason string) error 
 
 // GetSalesOrder retrieves a sales order by ID
 func (s *SalesOrderService) GetSalesOrder(id uuid.UUID) (*dto.SalesOrderResponse, error) {
+	return s.GetSalesOrderWithContext(context.Background(), id)
+}
+
+// GetSalesOrderWithContext retrieves a sales order by ID using request context
+func (s *SalesOrderService) GetSalesOrderWithContext(ctx context.Context, id uuid.UUID) (*dto.SalesOrderResponse, error) {
 	salesOrder, err := s.salesOrderRepo.FindByID(id)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find sales order: %w", err)
 	}
-	resp := s.toSalesOrderResponse(context.Background(), salesOrder)
+	ctxWithOrg := withOrgInContext(ctx, salesOrder.OrganizationID)
+	resp := s.toSalesOrderResponse(ctxWithOrg, salesOrder)
 	if s.invoiceRepo != nil {
-		if invoices, invErr := s.invoiceRepo.ListBySalesOrderID(context.Background(), id); invErr == nil && len(invoices) > 0 {
+		if invoices, invErr := s.invoiceRepo.ListBySalesOrderID(ctxWithOrg, id); invErr == nil && len(invoices) > 0 {
 			resp.Invoices = make([]dto.InvoiceSummaryResponse, 0, len(invoices))
 			for _, inv := range invoices {
 				method, txID := "", ""
@@ -830,14 +876,20 @@ func (s *SalesOrderService) GetSalesOrder(id uuid.UUID) (*dto.SalesOrderResponse
 
 // ListSalesOrders retrieves sales orders with filters
 func (s *SalesOrderService) ListSalesOrders(orgID uuid.UUID, filters *dto.SalesOrderFilters) ([]*dto.SalesOrderResponse, int64, error) {
+	return s.ListSalesOrdersWithContext(context.Background(), orgID, filters)
+}
+
+// ListSalesOrdersWithContext retrieves sales orders with filters using request context
+func (s *SalesOrderService) ListSalesOrdersWithContext(ctx context.Context, orgID uuid.UUID, filters *dto.SalesOrderFilters) ([]*dto.SalesOrderResponse, int64, error) {
 	salesOrders, total, err := s.salesOrderRepo.List(orgID, filters)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to list sales orders: %w", err)
 	}
 
+	ctxWithOrg := withOrgInContext(ctx, orgID)
 	responses := make([]*dto.SalesOrderResponse, len(salesOrders))
 	for i, order := range salesOrders {
-		responses[i] = s.toSalesOrderResponse(context.Background(), order)
+		responses[i] = s.toSalesOrderResponse(ctxWithOrg, order)
 	}
 
 	return responses, total, nil
@@ -845,6 +897,7 @@ func (s *SalesOrderService) ListSalesOrders(orgID uuid.UUID, filters *dto.SalesO
 
 // toSalesOrderResponse converts domain entity to DTO
 func (s *SalesOrderService) toSalesOrderResponse(ctx context.Context, salesOrder *domain.SalesOrder) *dto.SalesOrderResponse {
+	ctx = withOrgInContext(ctx, salesOrder.OrganizationID)
 	items := make([]dto.SalesOrderItemDTO, len(salesOrder.Items))
 	for i, item := range salesOrder.Items {
 		items[i] = dto.SalesOrderItemDTO{
@@ -862,42 +915,83 @@ func (s *SalesOrderService) toSalesOrderResponse(ctx context.Context, salesOrder
 		}
 	}
 
-	// Fetch customer name from read model
+	// Fetch customer name from read model and fallback to Customer Service
 	var customerName string
 	var companyName string
+	var customerEmail string
+	var customerPhone string
+	var customerTaxNumber string
 	var subject string
 	var billingStreet, billingCity, billingState, billingCode, billingCountry string
 	var shippingStreet, shippingCity, shippingState, shippingCode, shippingCountry string
 
 	customer, err := s.rmRepo.GetCustomer(ctx, salesOrder.CustomerID)
-	if err != nil || customer == nil || customer.DisplayName == "" {
-		// Fallback to customerClient if read model fails or provides empty name
-		if s.customerClient != nil {
-			fmt.Printf("[INFO] SalesOrder customer %s missing or invalid in ReadModel, fetching from Customer Service\n", salesOrder.CustomerID)
-			remoteCustomer, remoteErr := s.customerClient.GetCustomer(ctx, salesOrder.CustomerID)
-			if remoteErr == nil && remoteCustomer != nil {
-				customerName = remoteCustomer.DisplayName
-				companyName = remoteCustomer.CompanyName
-				billingStreet = remoteCustomer.BillingStreet
-				billingCity = remoteCustomer.BillingCity
-				billingState = remoteCustomer.BillingState
-				billingCode = remoteCustomer.BillingCode
-				billingCountry = remoteCustomer.BillingCountry
-				shippingStreet = remoteCustomer.ShippingStreet
-				shippingCity = remoteCustomer.ShippingCity
-				shippingState = remoteCustomer.ShippingState
-				shippingCode = remoteCustomer.ShippingCode
-				shippingCountry = remoteCustomer.ShippingCountry
+	needRemoteCustomer := err != nil || customer == nil || customer.DisplayName == "" || customer.Email == "" || (customer.Phone == "" && customer.PhoneWork == "" && customer.PhoneMobile == "")
+	if needRemoteCustomer && s.customerClient != nil {
+		fmt.Printf("[INFO] SalesOrder customer %s missing or incomplete in ReadModel, fetching from Customer Service\n", salesOrder.CustomerID)
+		if remoteCustomer, remoteErr := s.customerClient.GetCustomer(ctx, salesOrder.CustomerID); remoteErr == nil && remoteCustomer != nil {
+			if customer == nil {
+				customer = remoteCustomer
+			} else {
+				if customer.DisplayName == "" {
+					customer.DisplayName = remoteCustomer.DisplayName
+				}
+				if customer.CompanyName == "" {
+					customer.CompanyName = remoteCustomer.CompanyName
+				}
+				if customer.Email == "" {
+					customer.Email = remoteCustomer.Email
+				}
+				if customer.Phone == "" {
+					customer.Phone = remoteCustomer.Phone
+				}
+				if customer.PhoneWork == "" {
+					customer.PhoneWork = remoteCustomer.PhoneWork
+				}
+				if customer.PhoneMobile == "" {
+					customer.PhoneMobile = remoteCustomer.PhoneMobile
+				}
+				if customer.TaxNumber == "" {
+					customer.TaxNumber = remoteCustomer.TaxNumber
+				}
+				if customer.BillingStreet == "" {
+					customer.BillingStreet = remoteCustomer.BillingStreet
+					customer.BillingCity = remoteCustomer.BillingCity
+					customer.BillingState = remoteCustomer.BillingState
+					customer.BillingCode = remoteCustomer.BillingCode
+					customer.BillingCountry = remoteCustomer.BillingCountry
+				}
+				if customer.ShippingStreet == "" {
+					customer.ShippingStreet = remoteCustomer.ShippingStreet
+					customer.ShippingCity = remoteCustomer.ShippingCity
+					customer.ShippingState = remoteCustomer.ShippingState
+					customer.ShippingCode = remoteCustomer.ShippingCode
+					customer.ShippingCountry = remoteCustomer.ShippingCountry
+				}
 			}
+		} else if remoteErr != nil {
+			fmt.Printf("[WARNING] Failed to fetch customer %s from Customer Service: %v\n", salesOrder.CustomerID, remoteErr)
 		}
+	}
 
-		// If still empty after fallback, use "Unknown Customer"
-		if customerName == "" {
-			customerName = "Unknown Customer"
-		}
-	} else {
+	if customer != nil {
 		customerName = customer.DisplayName
+		if customerName == "" {
+			customerName = strings.TrimSpace(customer.FirstName + " " + customer.LastName)
+		}
+		if customerName == "" {
+			customerName = customer.CompanyName
+		}
 		companyName = customer.CompanyName
+		customerEmail = customer.Email
+		customerPhone = customer.Phone
+		if customerPhone == "" {
+			customerPhone = customer.PhoneWork
+		}
+		if customerPhone == "" {
+			customerPhone = customer.PhoneMobile
+		}
+		customerTaxNumber = customer.TaxNumber
 		billingStreet = customer.BillingStreet
 		billingCity = customer.BillingCity
 		billingState = customer.BillingState
@@ -941,24 +1035,47 @@ func (s *SalesOrderService) toSalesOrderResponse(ctx context.Context, salesOrder
 	if salesOrder.ContactID != nil {
 		c, err := s.rmRepo.GetContact(ctx, *salesOrder.ContactID)
 		if err == nil && c != nil && c.FirstName != "" {
+			cPhone := c.Phone
+			if cPhone == "" {
+				cPhone = c.Mobile
+			}
 			contact = &dto.ContactResponse{
 				ID:        c.ID,
 				FirstName: c.FirstName,
 				LastName:  c.LastName,
 				Email:     c.Email,
+				Phone:     cPhone,
 			}
 		} else if s.customerClient != nil {
 			// Fallback to customerClient
 			remoteContact, remoteErr := s.customerClient.GetContact(ctx, *salesOrder.ContactID)
 			if remoteErr == nil && remoteContact != nil {
+				cPhone := remoteContact.Phone
+				if cPhone == "" {
+					cPhone = remoteContact.Mobile
+				}
 				contact = &dto.ContactResponse{
 					ID:        remoteContact.ID,
 					FirstName: remoteContact.FirstName,
 					LastName:  remoteContact.LastName,
 					Email:     remoteContact.Email,
+					Phone:     cPhone,
 				}
 			}
 		}
+	}
+
+	if customerName == "" && contact != nil {
+		customerName = strings.TrimSpace(contact.FirstName + " " + contact.LastName)
+	}
+	if customerName == "" {
+		customerName = "Unknown Customer"
+	}
+	if customerEmail == "" && contact != nil {
+		customerEmail = contact.Email
+	}
+	if customerPhone == "" && contact != nil {
+		customerPhone = contact.Phone
 	}
 
 	// Generate subject from order number or use a default if not set
@@ -1009,6 +1126,9 @@ func (s *SalesOrderService) toSalesOrderResponse(ctx context.Context, salesOrder
 			ID:          salesOrder.CustomerID,
 			DisplayName: customerName,
 			CompanyName: companyName,
+			Email:       customerEmail,
+			Phone:       customerPhone,
+			TaxNumber:   customerTaxNumber,
 		},
 		Contact:         contact,
 		BillingStreet:   billingStreet,

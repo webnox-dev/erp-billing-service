@@ -46,7 +46,7 @@ func (h *SalesOrderHandler) CreateSalesOrder(w http.ResponseWriter, r *http.Requ
 		}
 	}
 
-	order, err := h.service.CreateSalesOrder(&req)
+	order, err := h.service.CreateSalesOrderWithContext(withGatewayContext(r), &req)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		errStr := err.Error()
@@ -85,7 +85,7 @@ func (h *SalesOrderHandler) UpdateSalesOrder(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	order, err := h.service.UpdateSalesOrder(id, &req)
+	order, err := h.service.UpdateSalesOrderWithContext(withGatewayContext(r), id, &req)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		if strings.Contains(err.Error(), "validation failed") || strings.Contains(err.Error(), "cannot edit") {
@@ -112,7 +112,7 @@ func (h *SalesOrderHandler) GetSalesOrder(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	order, err := h.service.GetSalesOrder(id)
+	order, err := h.service.GetSalesOrderWithContext(withGatewayContext(r), id)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotFound)
@@ -301,7 +301,7 @@ func (h *SalesOrderHandler) ListSalesOrders(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
-	orders, total, err := h.service.ListSalesOrders(orgID, filters)
+	orders, total, err := h.service.ListSalesOrdersWithContext(withGatewayContext(r), orgID, filters)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
@@ -329,7 +329,7 @@ func (h *SalesOrderHandler) ConfirmSalesOrder(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	order, err := h.service.ConfirmSalesOrder(id)
+	order, err := h.service.ConfirmSalesOrderWithContext(withGatewayContext(r), id)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
@@ -384,7 +384,7 @@ func (h *SalesOrderHandler) MarkAsShipped(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	order, err := h.service.MarkAsShipped(id, &req)
+	order, err := h.service.MarkAsShippedWithContext(withGatewayContext(r), id, &req)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
@@ -415,7 +415,7 @@ func (h *SalesOrderHandler) MarkAsDelivered(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	order, err := h.service.MarkAsDelivered(id, &req)
+	order, err := h.service.MarkAsDeliveredWithContext(withGatewayContext(r), id, &req)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		errMsg := err.Error()
@@ -500,7 +500,7 @@ func (h *SalesOrderHandler) SendSalesOrder(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	order, err := h.service.SendSalesOrder(r.Context(), id)
+	order, err := h.service.SendSalesOrder(withGatewayContext(r), id)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
