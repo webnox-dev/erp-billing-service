@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"time"
 
 	"erp-billing-service/internal/domain"
 
@@ -31,6 +32,81 @@ func (r *ReadModelRepository) GetCustomer(ctx context.Context, id uuid.UUID) (*d
 	}
 	r.populateCustomerFlatFields(ctx, &rm)
 	return &rm, nil
+}
+
+// UpsertCustomer refreshes cached customer read-model fields in customers_readonly.
+func (r *ReadModelRepository) UpsertCustomer(ctx context.Context, rm *domain.CustomerRM) error {
+	if rm == nil || rm.ID == uuid.Nil {
+		return nil
+	}
+
+	var existing domain.CustomerRM
+	err := r.db.WithContext(ctx).Unscoped().First(&existing, "id = ?", rm.ID).Error
+	if err == gorm.ErrRecordNotFound {
+		copyRM := *rm
+		if copyRM.CreatedAt.IsZero() {
+			copyRM.CreatedAt = time.Now()
+		}
+		if copyRM.UpdatedAt.IsZero() {
+			copyRM.UpdatedAt = time.Now()
+		}
+		return r.db.WithContext(ctx).Create(&copyRM).Error
+	}
+	if err != nil {
+		return err
+	}
+
+	updates := map[string]interface{}{
+		"updated_at": time.Now(),
+		"deleted_at": nil,
+	}
+	if rm.OrganizationID != uuid.Nil {
+		updates["organization_id"] = rm.OrganizationID
+	}
+	if rm.CustomerType != "" {
+		updates["customer_type"] = rm.CustomerType
+	}
+	if rm.DisplayName != "" {
+		updates["display_name"] = rm.DisplayName
+	}
+	if rm.CompanyName != "" {
+		updates["company_name"] = rm.CompanyName
+	}
+	if rm.FirstName != "" {
+		updates["first_name"] = rm.FirstName
+	}
+	if rm.LastName != "" {
+		updates["last_name"] = rm.LastName
+	}
+	if rm.Salutation != "" {
+		updates["salutation"] = rm.Salutation
+	}
+	if rm.Email != "" {
+		updates["email"] = rm.Email
+	}
+	if rm.PhoneWork != "" {
+		updates["phone_work"] = rm.PhoneWork
+	}
+	if rm.PhoneMobile != "" {
+		updates["phone_mobile"] = rm.PhoneMobile
+	}
+	if rm.TaxNumber != "" {
+		updates["tax_number"] = rm.TaxNumber
+	}
+	if rm.Status != "" {
+		updates["status"] = rm.Status
+	}
+	if rm.BillingAddressID != nil {
+		updates["billing_address_id"] = rm.BillingAddressID
+	}
+	if rm.ShippingAddressID != nil {
+		updates["shipping_address_id"] = rm.ShippingAddressID
+	}
+	if rm.ServiceAddressID != nil {
+		updates["service_address_id"] = rm.ServiceAddressID
+	}
+
+	return r.db.WithContext(ctx).Unscoped().Model(&domain.CustomerRM{}).Where("id = ?", rm.ID).Updates(updates).Error
 }
 
 func (r *ReadModelRepository) SearchCustomers(ctx context.Context, orgID uuid.UUID, query string) ([]domain.CustomerRM, error) {
