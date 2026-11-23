@@ -99,6 +99,14 @@ func (s *SalesOrderService) CreateSalesOrderWithContext(ctx context.Context, req
 	}
 
 	// Create sales order entity
+	sourceSystem := domain.NormalizeSalesOrderSourceSystem(req.SourceSystem)
+	if sourceSystem == "" {
+		sourceSystem = domain.NormalizeSalesOrderSourceSystem(req.Module)
+	}
+	if sourceSystem == "" {
+		sourceSystem = domain.SourceSystemInventory
+	}
+
 	orderID := uuid.New()
 	draftNum := fmt.Sprintf("DRAFT-%s", orderID.String()[:8])
 	salesOrder := &domain.SalesOrder{
@@ -106,6 +114,7 @@ func (s *SalesOrderService) CreateSalesOrderWithContext(ctx context.Context, req
 		OrganizationID:    req.OrganizationID,
 		CustomerID:        req.CustomerID,
 		ContactID:         req.ContactID,
+		SourceSystem:      sourceSystem,
 		OrderNumber:       &draftNum,
 		ServiceCategoryID: req.ServiceCategoryID,
 		PartCategoryID:    req.PartCategoryID,
@@ -490,6 +499,11 @@ func (s *SalesOrderService) CreateInvoiceFromOrder(orderID uuid.UUID) (*dto.Invo
 		ownerID = adminUUID
 	}
 
+	invoiceSourceSystem := salesOrder.SourceSystem
+	if invoiceSourceSystem == "" {
+		invoiceSourceSystem = domain.SourceSystemInventory
+	}
+
 	invoice := &domain.Invoice{
 		ID:             uuid.New(),
 		OrganizationID: salesOrder.OrganizationID,
@@ -497,7 +511,7 @@ func (s *SalesOrderService) CreateInvoiceFromOrder(orderID uuid.UUID) (*dto.Invo
 		ContactID:      salesOrder.ContactID,
 		OwnerID:        ownerID,
 		Subject:        invoiceSubject,
-		SourceSystem:   domain.SourceSystemInventory,
+		SourceSystem:   invoiceSourceSystem,
 		SalesOrderID:   &salesOrder.ID,
 		InvoiceDate:    time.Now(),
 		DueDate:        time.Now().AddDate(0, 0, 30), // 30 days default
@@ -1096,6 +1110,7 @@ func (s *SalesOrderService) toSalesOrderResponse(ctx context.Context, salesOrder
 		CustomerID:     salesOrder.CustomerID,
 		CustomerName:   customerName,
 		ContactID:      salesOrder.ContactID,
+		SourceSystem:   string(salesOrder.SourceSystem),
 		OrderNumber:    salesOrder.OrderNumber,
 		Subject:        subject,
 		OrderDate:      ConvertToOrgTZValue(ctx, salesOrder.OrderDate, salesOrder.OrganizationID, s.rmRepo),

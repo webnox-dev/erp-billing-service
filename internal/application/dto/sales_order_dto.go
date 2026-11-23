@@ -35,6 +35,7 @@ type CreateSalesOrderRequest struct {
 	Terms             string              `json:"terms"`
 	Notes             string              `json:"notes"`
 	Module            string              `json:"module,omitempty"`
+	SourceSystem      string              `json:"source_system,omitempty"`
 }
 
 // UpdateSalesOrderRequest represents a request to update a sales order
@@ -133,6 +134,7 @@ type SalesOrderResponse struct {
 
 // SalesOrderFilters represents filters for listing sales orders
 type SalesOrderFilters struct {
+	Module         *string    `json:"module,omitempty"`
 	Status         *string    `json:"status,omitempty"`
 	CustomerID     *uuid.UUID `json:"customer_id,omitempty"`
 	CustomerName   *string    `json:"customer_name,omitempty"`
