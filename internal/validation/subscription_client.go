@@ -165,6 +165,100 @@ func resolveActiveBillingPlanIDs(db *gorm.DB, subID, subPlanID, restrictionKey, 
 	return planIDs, effectiveModule
 }
 
+func (c *SubscriptionClient) findDefaultPlanIDForKey(restrictionKey string) string {
+	var defaultPlan struct {
+		ID string
+	}
+	if err := c.db.Table("plans_readonly p").
+		Joins("JOIN plan_restrictions_readonly pr ON pr.plan_id = p.id AND pr.deleted_at IS NULL").
+		Where("p.is_default = TRUE AND p.is_active = TRUE AND pr.restriction_key = ?", restrictionKey).
+		Order("CASE WHEN pr.restriction_value = -1 THEN 999999 ELSE pr.restriction_value END DESC").
+		Select("p.id").
+		Limit(1).
+		Scan(&defaultPlan).Error; err == nil && defaultPlan.ID != "" {
+		return defaultPlan.ID
+	}
+	if err := c.db.Table("plans_readonly").
+		Where("is_default = TRUE AND is_active = TRUE").
+		Select("id").
+		Limit(1).
+		Scan(&defaultPlan).Error; err == nil && defaultPlan.ID != "" {
+		return defaultPlan.ID
+	}
+	return "10000000-0000-0000-0000-000000000001"
+}
+
+type billingPlanItemCandidate struct {
+	PlanID    string    `gorm:"column:plan_id"`
+	ValidDays int       `gorm:"column:valid_days"`
+	Price     float64   `gorm:"column:price"`
+	IsDefault bool      `gorm:"column:is_default"`
+	CreatedAt time.Time `gorm:"column:created_at"`
+}
+
+func appendUniquePlanID(list []string, pid string) []string {
+	if pid == "" {
+		return list
+	}
+	for _, existing := range list {
+		if existing == pid {
+			return list
+		}
+	}
+	return append(list, pid)
+}
+
+func isSubscriptionExpired(subID, status string, expiryDate, now time.Time) bool {
+	if subID == "" {
+		return true
+	}
+	statusLower := strings.ToLower(status)
+	if statusLower == "expired" || statusLower == "cancelled" {
+		return true
+	}
+	if (statusLower == "active" || statusLower == "trial" || statusLower == "paid") && !expiryDate.IsZero() && now.After(expiryDate) {
+		return true
+	}
+	return false
+}
+
+func partitionActivePlanItems(items []billingPlanItemCandidate, now time.Time) ([]string, []string) {
+	var nonDefaultPlanIDs []string
+	var allPlanIDs []string
+	for _, item := range items {
+		if item.PlanID == "" {
+			continue
+		}
+		// Default fallback plans never expire. Temporary non-default trials expire after valid_days.
+		if !item.IsDefault && item.Price == 0 && item.ValidDays > 0 {
+			if now.After(item.CreatedAt.AddDate(0, 0, item.ValidDays)) {
+				continue
+			}
+		}
+		allPlanIDs = appendUniquePlanID(allPlanIDs, item.PlanID)
+		if !item.IsDefault {
+			nonDefaultPlanIDs = appendUniquePlanID(nonDefaultPlanIDs, item.PlanID)
+		}
+	}
+	return nonDefaultPlanIDs, allPlanIDs
+}
+
+func pickHighestRestrictionLimit(values []int) (int, bool) {
+	if len(values) == 0 {
+		return 0, false
+	}
+	best := values[0]
+	for _, v := range values[1:] {
+		if v == -1 {
+			return -1, true
+		}
+		if best != -1 && v > best {
+			best = v
+		}
+	}
+	return best, true
+}
+
 // ValidateRestrictionDetailed checks restriction with full details
 // Returns (allowed, message, limit, currentValue, error)
 func (c *SubscriptionClient) ValidateRestrictionDetailed(orgID, restrictionKey string, optionalModules ...string) (bool, string, int, int, error) {
@@ -187,50 +281,136 @@ func (c *SubscriptionClient) ValidateRestrictionDetailed(orgID, restrictionKey s
 		Limit(1).
 		Scan(&sub).Error
 
-	statusLower := strings.ToLower(sub.Status)
-	isExpired := false
-	if err != nil || sub.ID == "" {
-		isExpired = true
-	} else if (statusLower == "active" || statusLower == "trial" || statusLower == "paid") && !sub.ExpiryDate.IsZero() && time.Now().UTC().After(sub.ExpiryDate) {
-		isExpired = true
-	} else if statusLower == "expired" || statusLower == "cancelled" {
-		isExpired = true
-	}
+	now := time.Now().UTC()
+	isExpired := err != nil || isSubscriptionExpired(sub.ID, sub.Status, sub.ExpiryDate, now)
 
-	// 2. Resolve plan_ids with module isolation when specified or inferred
-	var planIDs []string
+	// 2. Collect non-default (purchased) and default plan_ids with module isolation when specified or inferred
+	var nonDefaultPlanIDs []string
+	var allPlanIDs []string
 	effectiveModule := targetModule
+
 	if isExpired {
-		planIDs = resolveDefaultBillingPlanIDs(c.db, restrictionKey, targetModule)
+		if targetModule != "" {
+			for _, pid := range resolveDefaultBillingPlanIDs(c.db, restrictionKey, targetModule) {
+				allPlanIDs = appendUniquePlanID(allPlanIDs, pid)
+			}
+		}
+		if len(allPlanIDs) == 0 {
+			allPlanIDs = appendUniquePlanID(allPlanIDs, c.findDefaultPlanIDForKey(restrictionKey))
+		}
+	} else if targetModule != "" {
+		var validItems []billingPlanItemCandidate
+		c.db.Table("organization_subscription_items_readonly").
+			Select("organization_subscription_items_readonly.plan_id, COALESCE(plans_readonly.valid_days, 0) AS valid_days, COALESCE(plans_readonly.price, 0) AS price, COALESCE(plans_readonly.is_default, FALSE) AS is_default, organization_subscription_items_readonly.created_at").
+			Joins("LEFT JOIN plans_readonly ON organization_subscription_items_readonly.plan_id = plans_readonly.id").
+			Where("organization_subscription_items_readonly.subscription_id = ? AND LOWER(organization_subscription_items_readonly.module_slug) = ?", sub.ID, targetModule).
+			Scan(&validItems)
+
+		nonDefaultPlanIDs, allPlanIDs = partitionActivePlanItems(validItems, now)
+
+		if len(allPlanIDs) == 0 {
+			var itemCount int64
+			c.db.Table("organization_subscription_items_readonly").
+				Where("subscription_id = ?", sub.ID).
+				Count(&itemCount)
+			if itemCount > 0 {
+				for _, pid := range resolveDefaultBillingPlanIDs(c.db, restrictionKey, targetModule) {
+					allPlanIDs = appendUniquePlanID(allPlanIDs, pid)
+				}
+			} else if sub.PlanID != "" {
+				var subPlanDefault bool
+				_ = c.db.Table("plans_readonly").Where("id = ?", sub.PlanID).Select("is_default").Scan(&subPlanDefault).Error
+				allPlanIDs = appendUniquePlanID(allPlanIDs, sub.PlanID)
+				if !subPlanDefault {
+					nonDefaultPlanIDs = appendUniquePlanID(nonDefaultPlanIDs, sub.PlanID)
+				}
+			}
+		}
 	} else {
-		planIDs, effectiveModule = resolveActiveBillingPlanIDs(c.db, sub.ID, sub.PlanID, restrictionKey, targetModule)
+		if imsRestrictionKeys[restrictionKey] {
+			var imsItem struct{ PlanID string }
+			if errIMS := c.db.Table("organization_subscription_items_readonly").
+				Where("subscription_id = ? AND LOWER(module_slug) = ?", sub.ID, "ims").
+				Select("plan_id").
+				Limit(1).
+				Scan(&imsItem).Error; errIMS == nil && imsItem.PlanID != "" {
+				effectiveModule = "ims"
+			}
+		}
+
+		var validItems []billingPlanItemCandidate
+		c.db.Table("organization_subscription_items_readonly").
+			Select("organization_subscription_items_readonly.plan_id, COALESCE(plans_readonly.valid_days, 0) AS valid_days, COALESCE(plans_readonly.price, 0) AS price, COALESCE(plans_readonly.is_default, FALSE) AS is_default, organization_subscription_items_readonly.created_at").
+			Joins("LEFT JOIN plans_readonly ON organization_subscription_items_readonly.plan_id = plans_readonly.id").
+			Where("organization_subscription_items_readonly.subscription_id = ?", sub.ID).
+			Scan(&validItems)
+
+		nonDefaultPlanIDs, allPlanIDs = partitionActivePlanItems(validItems, now)
+
+		if sub.PlanID != "" {
+			var subPlanDefault bool
+			_ = c.db.Table("plans_readonly").Where("id = ?", sub.PlanID).Select("is_default").Scan(&subPlanDefault).Error
+			allPlanIDs = appendUniquePlanID(allPlanIDs, sub.PlanID)
+			if !subPlanDefault {
+				nonDefaultPlanIDs = appendUniquePlanID(nonDefaultPlanIDs, sub.PlanID)
+			}
+		}
 	}
 
-	if len(planIDs) == 0 {
-		return true, "No plan IDs found — allowed (fail-open)", -1, 0, nil
+	if len(allPlanIDs) == 0 {
+		if targetModule != "" {
+			for _, pid := range resolveDefaultBillingPlanIDs(c.db, restrictionKey, targetModule) {
+				allPlanIDs = appendUniquePlanID(allPlanIDs, pid)
+			}
+		}
+		if len(allPlanIDs) == 0 {
+			allPlanIDs = appendUniquePlanID(allPlanIDs, c.findDefaultPlanIDForKey(restrictionKey))
+		}
 	}
 
-	// 3. Query restriction value from plan_restrictions_readonly across all subscribed plans
-	var restriction struct {
-		RestrictionValue int
+	// 3. Query restriction value: prefer explicit non-default purchased plans first;
+	// fallback to all active plan IDs, then to the module/key default plan defining this restriction.
+	lookupRestriction := func(candidatePlanIDs []string) (int, bool) {
+		if len(candidatePlanIDs) == 0 {
+			return 0, false
+		}
+		var cnt int64
+		c.db.Table("plan_restrictions_readonly").
+			Where("plan_id IN ? AND restriction_key = ? AND deleted_at IS NULL", candidatePlanIDs, restrictionKey).
+			Count(&cnt)
+		if cnt == 0 {
+			return 0, false
+		}
+		var restriction struct {
+			RestrictionValue int
+		}
+		if err := c.db.Table("plan_restrictions_readonly").
+			Where("plan_id IN ? AND restriction_key = ? AND deleted_at IS NULL", candidatePlanIDs, restrictionKey).
+			Order("CASE WHEN restriction_value = -1 THEN 999999 ELSE restriction_value END DESC").
+			Limit(1).
+			Scan(&restriction).Error; err != nil {
+			return 0, false
+		}
+		return restriction.RestrictionValue, true
 	}
-	var count int64
-	c.db.Table("plan_restrictions_readonly").
-		Where("plan_id IN ? AND restriction_key = ? AND deleted_at IS NULL", planIDs, restrictionKey).
-		Count(&count)
-	if count == 0 {
+
+	limitValue, found := lookupRestriction(nonDefaultPlanIDs)
+	if !found {
+		limitValue, found = lookupRestriction(allPlanIDs)
+	}
+	if !found {
+		var defaultCandidates []string
+		if targetModule != "" {
+			defaultCandidates = resolveDefaultBillingPlanIDs(c.db, restrictionKey, targetModule)
+		}
+		if len(defaultCandidates) == 0 {
+			defaultCandidates = []string{c.findDefaultPlanIDForKey(restrictionKey)}
+		}
+		limitValue, found = lookupRestriction(defaultCandidates)
+	}
+	if !found {
 		return true, "No limit specified", -1, 0, nil
 	}
-
-	err = c.db.Table("plan_restrictions_readonly").
-		Where("plan_id IN ? AND restriction_key = ? AND deleted_at IS NULL", planIDs, restrictionKey).
-		Order("restriction_value ASC").
-		Scan(&restriction).Error
-	if err != nil {
-		return true, "No limit specified", -1, 0, nil
-	}
-
-	limitValue := restriction.RestrictionValue
 
 	if strings.HasPrefix(restrictionKey, "allow_") {
 		allowed := limitValue == 1
