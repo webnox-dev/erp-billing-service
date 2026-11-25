@@ -23,10 +23,9 @@ func NewEstimateInvoiceHandler(invoiceService *application.InvoiceService) *Esti
 
 // CreateInvoiceFromEstimate handles POST /billing/estimates/{id}/invoice
 func (h *EstimateInvoiceHandler) CreateInvoiceFromEstimate(w http.ResponseWriter, r *http.Request) {
-	// Get organization ID from header
-	orgIDStr := r.Header.Get("X-Organization-ID")
-	orgID, err := uuid.Parse(orgIDStr)
-	if err != nil {
+	// Resolve organization ID from header or verified JWT
+	orgID := resolveOrganizationID(r)
+	if orgID == uuid.Nil {
 		http.Error(w, "invalid organization ID", http.StatusBadRequest)
 		return
 	}

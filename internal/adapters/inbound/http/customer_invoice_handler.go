@@ -44,8 +44,7 @@ func (h *CustomerInvoiceHandler) ListCustomerInvoices(w http.ResponseWriter, r *
 		return
 	}
 
-	orgIDStr := r.Header.Get("X-Organization-ID")
-	orgID, _ := uuid.Parse(orgIDStr)
+	orgID := resolveOrganizationID(r)
 
 	// Get status filter from query params
 	statusFilter := strings.ToLower(r.URL.Query().Get("status"))
@@ -150,8 +149,7 @@ func (h *CustomerInvoiceHandler) ListCustomerPayments(w http.ResponseWriter, r *
 		return
 	}
 
-	orgIDStr := r.Header.Get("X-Organization-ID")
-	orgID, _ := uuid.Parse(orgIDStr)
+	orgID := resolveOrganizationID(r)
 
 	statusFilter := strings.ToLower(r.URL.Query().Get("status"))
 

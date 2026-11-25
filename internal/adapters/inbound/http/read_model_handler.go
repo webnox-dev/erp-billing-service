@@ -21,8 +21,7 @@ func NewReadModelHandler(repo domain.ReadModelRepository) *ReadModelHandler {
 
 func (h *ReadModelHandler) SearchCustomers(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query().Get("q")
-	orgIDStr := r.Header.Get("X-Organization-ID")
-	orgID, _ := uuid.Parse(orgIDStr)
+	orgID := resolveOrganizationID(r)
 
 	res, err := h.repo.SearchCustomers(r.Context(), orgID, query)
 	if err != nil {
@@ -42,8 +41,7 @@ func (h *ReadModelHandler) SearchCustomers(w http.ResponseWriter, r *http.Reques
 
 func (h *ReadModelHandler) SearchItems(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query().Get("q")
-	orgIDStr := r.Header.Get("X-Organization-ID")
-	orgID, _ := uuid.Parse(orgIDStr)
+	orgID := resolveOrganizationID(r)
 
 	res, err := h.repo.SearchItems(r.Context(), orgID, query)
 	if err != nil {
@@ -66,8 +64,7 @@ func (h *ReadModelHandler) SearchContacts(w http.ResponseWriter, r *http.Request
 	customerIDStr := r.URL.Query().Get("customer_id")
 	customerID, _ := uuid.Parse(customerIDStr)
 
-	orgIDStr := r.Header.Get("X-Organization-ID")
-	orgID, _ := uuid.Parse(orgIDStr)
+	orgID := resolveOrganizationID(r)
 
 	res, err := h.repo.SearchContacts(r.Context(), orgID, customerID, query)
 	if err != nil {
@@ -89,8 +86,7 @@ func (h *ReadModelHandler) SearchContacts(w http.ResponseWriter, r *http.Request
 // Returns work orders from the local work_order_rms table (Kafka-synced replica).
 func (h *ReadModelHandler) SearchWorkOrders(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query().Get("search")
-	orgIDStr := r.Header.Get("X-Organization-ID")
-	orgID, _ := uuid.Parse(orgIDStr)
+	orgID := resolveOrganizationID(r)
 
 	res, err := h.repo.SearchWorkOrders(r.Context(), orgID, query)
 	if err != nil {

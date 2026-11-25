@@ -34,10 +34,8 @@ func (h *SalesOrderHandler) CreateSalesOrder(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// Get organization ID from header
-	orgIDStr := r.Header.Get("X-Organization-ID")
-	orgID, _ := uuid.Parse(orgIDStr)
-	req.OrganizationID = orgID
+	// Resolve organization ID from header, request payload, or verified JWT
+	req.OrganizationID = resolveOrganizationID(r, req.OrganizationID)
 	if strings.TrimSpace(req.Module) == "" {
 		if modHeader := strings.TrimSpace(r.Header.Get("X-Module")); modHeader != "" {
 			req.Module = modHeader
@@ -126,8 +124,7 @@ func (h *SalesOrderHandler) GetSalesOrder(w http.ResponseWriter, r *http.Request
 
 // ListSalesOrders handles GET /api/v1/sales-orders
 func (h *SalesOrderHandler) ListSalesOrders(w http.ResponseWriter, r *http.Request) {
-	orgIDStr := r.Header.Get("X-Organization-ID")
-	orgID, _ := uuid.Parse(orgIDStr)
+	orgID := resolveOrganizationID(r)
 
 	// Parse query parameters
 	filters := &dto.SalesOrderFilters{

@@ -1,7 +1,6 @@
 package http
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -26,20 +25,6 @@ func NewInvoiceHandler(service *application.InvoiceService) *InvoiceHandler {
 	return &InvoiceHandler{service: service}
 }
 
-func withGatewayContext(r *http.Request) context.Context {
-	ctx := r.Context()
-	if auth := r.Header.Get("Authorization"); auth != "" {
-		ctx = context.WithValue(ctx, "authorization", auth)
-	}
-	if orgID := r.Header.Get("X-Organization-ID"); orgID != "" {
-		ctx = context.WithValue(ctx, "organization_id", orgID)
-	}
-	if userID := r.Header.Get("X-User-ID"); userID != "" {
-		ctx = context.WithValue(ctx, "user_id", userID)
-	}
-	return ctx
-}
-
 func (h *InvoiceHandler) CreateInvoice(w http.ResponseWriter, r *http.Request) {
 	var req dto.CreateInvoiceRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -48,13 +33,12 @@ func (h *InvoiceHandler) CreateInvoice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// In a real app, orgID would come from the auth token context
-	orgIDStr := r.Header.Get("X-Organization-ID")
-	orgID, _ := uuid.Parse(orgIDStr)
+	// Resolve organization ID from header or verified JWT
+	orgID := resolveOrganizationID(r)
 	if orgID == uuid.Nil {
 		// Default to a zero UUID if missing, log it for debugging
 		// Avoid generating random new UUIDs as that makes data unreachable
-		fmt.Printf("[DEBUG] X-Organization-ID header missing in CreateInvoice, using Nil UUID\n")
+		fmt.Printf("[DEBUG] Organization ID missing in CreateInvoice, using Nil UUID\n")
 	}
 
 	fmt.Printf("[DEBUG] Creating invoice with orgID: %s, request: %+v\n", orgID, req)
@@ -110,8 +94,7 @@ func (h *InvoiceHandler) UpdateInvoice(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *InvoiceHandler) ListInvoices(w http.ResponseWriter, r *http.Request) {
-	orgIDStr := r.Header.Get("X-Organization-ID")
-	orgID, _ := uuid.Parse(orgIDStr)
+	orgID := resolveOrganizationID(r)
 
 	filterParams := dto.InvoiceFilterParams{}
 

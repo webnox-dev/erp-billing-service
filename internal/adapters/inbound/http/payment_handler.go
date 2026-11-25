@@ -66,8 +66,7 @@ func (h *PaymentHandler) VoidPayment(w http.ResponseWriter, r *http.Request) {
 
 // ListPayments handles GET /api/v1/billing/payments
 func (h *PaymentHandler) ListPayments(w http.ResponseWriter, r *http.Request) {
-	orgIDStr := r.Header.Get("X-Organization-ID")
-	orgID, _ := uuid.Parse(orgIDStr)
+	orgID := resolveOrganizationID(r)
 
 	filterParams := dto.PaymentFilterParams{}
 

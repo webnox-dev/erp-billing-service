@@ -33,10 +33,8 @@ func (h *SalesReturnHandler) CreateSalesReturn(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	// Get organization ID from header
-	orgIDStr := r.Header.Get("X-Organization-ID")
-	orgID, _ := uuid.Parse(orgIDStr)
-	req.OrganizationID = orgID
+	// Resolve organization ID from header, request payload, or verified JWT
+	req.OrganizationID = resolveOrganizationID(r, req.OrganizationID)
 
 	log.Printf("[INFO] Creating sales return for order %s, org %s, items: %d", req.SalesOrderID, req.OrganizationID, len(req.Items))
 
@@ -80,8 +78,7 @@ func (h *SalesReturnHandler) GetSalesReturn(w http.ResponseWriter, r *http.Reque
 
 // ListSalesReturns handles GET /api/v1/sales-returns
 func (h *SalesReturnHandler) ListSalesReturns(w http.ResponseWriter, r *http.Request) {
-	orgIDStr := r.Header.Get("X-Organization-ID")
-	orgID, _ := uuid.Parse(orgIDStr)
+	orgID := resolveOrganizationID(r)
 
 	// Parse query parameters
 	filters := &dto.SalesReturnFilters{
