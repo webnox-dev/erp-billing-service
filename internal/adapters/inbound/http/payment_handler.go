@@ -173,7 +173,7 @@ func (h *PaymentHandler) ListPayments(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	result, err := h.service.ListPaymentsWithFilters(r.Context(), orgID, filterParams)
+	result, err := h.service.ListPaymentsWithFilters(withGatewayContext(r), orgID, filterParams)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

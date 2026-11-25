@@ -858,6 +858,9 @@ func (s *PaymentService) mapToResponse(ctx context.Context, payment *domain.Paym
 		}
 		resp.SalesOrderID = invoice.SalesOrderID
 		resp.SalesOrder = invoice.SalesOrder
+		if invoice.CustomerID != uuid.Nil {
+			resp.CustomerID = invoice.CustomerID.String()
+		}
 		customer, err := s.getCustomer(ctx, invoice.CustomerID)
 		if err != nil {
 			log.Printf("[PaymentService.mapToResponse] Error fetching customer %s: %v", invoice.CustomerID, err)

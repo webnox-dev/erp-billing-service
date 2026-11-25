@@ -25,6 +25,7 @@ type PaymentResponse struct {
 	PartialInvoiceNumber string     `json:"partial_invoice_number,omitempty"`
 	SalesOrderID         *uuid.UUID `json:"sales_order_id,omitempty"`
 	SalesOrder           string     `json:"sales_order,omitempty"`
+	CustomerID           string     `json:"customer_id,omitempty"`
 	CustomerName         string     `json:"customer_name,omitempty"`
 	Amount               float64    `json:"amount"`
 	Method               string     `json:"method"`
