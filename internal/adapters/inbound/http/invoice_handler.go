@@ -45,13 +45,18 @@ func (h *InvoiceHandler) CreateInvoice(w http.ResponseWriter, r *http.Request) {
 	invoice, err := h.service.CreateInvoice(withGatewayContext(r), orgID, req)
 	if err != nil {
 		fmt.Printf("[ERROR] Failed to create invoice: %v\n", err)
-		// Check if it's a validation error (stock unavailable, etc.)
-		if strings.Contains(err.Error(), "stock unavailable") ||
-			strings.Contains(err.Error(), "validation") ||
-			strings.Contains(err.Error(), "invalid") {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+		errStr := err.Error()
+		// Check if it's a plan limit or validation error (stock unavailable, etc.)
+		if strings.Contains(errStr, "plan allowance") ||
+			strings.Contains(errStr, "limit reached") ||
+			strings.Contains(errStr, "upgrade your subscription") {
+			http.Error(w, errStr, http.StatusForbidden)
+		} else if strings.Contains(errStr, "stock unavailable") ||
+			strings.Contains(errStr, "validation") ||
+			strings.Contains(errStr, "invalid") {
+			http.Error(w, errStr, http.StatusBadRequest)
 		} else {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			http.Error(w, errStr, http.StatusInternalServerError)
 		}
 		return
 	}
@@ -78,12 +83,17 @@ func (h *InvoiceHandler) UpdateInvoice(w http.ResponseWriter, r *http.Request) {
 	// Assuming UpdateInvoice logic in service returns updated invoice or error
 	invoice, err := h.service.UpdateInvoice(withGatewayContext(r), id, req)
 	if err != nil {
-		if err.Error() == "invoice not found" {
-			http.Error(w, err.Error(), http.StatusNotFound)
-		} else if strings.Contains(err.Error(), "validation") || strings.Contains(err.Error(), "cannot edit") {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+		errStr := err.Error()
+		if errStr == "invoice not found" {
+			http.Error(w, errStr, http.StatusNotFound)
+		} else if strings.Contains(errStr, "plan allowance") ||
+			strings.Contains(errStr, "limit reached") ||
+			strings.Contains(errStr, "upgrade your subscription") {
+			http.Error(w, errStr, http.StatusForbidden)
+		} else if strings.Contains(errStr, "validation") || strings.Contains(errStr, "cannot edit") {
+			http.Error(w, errStr, http.StatusBadRequest)
 		} else {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			http.Error(w, errStr, http.StatusInternalServerError)
 		}
 		return
 	}

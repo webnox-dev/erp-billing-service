@@ -81,9 +81,11 @@ func (c *CustomerHTTPClient) GetCustomer(ctx context.Context, id uuid.UUID) (*do
 			TaxNumber         string     `json:"tax_number"`
 			CurrencyCode      string     `json:"currency_code"`
 			PaymentTerms      string     `json:"payment_terms"`
+			SourceSystem      string     `json:"source_system"`
 			ServiceAddressID  *uuid.UUID `json:"service_address_id"`
 			BillingAddressID  *uuid.UUID `json:"billing_address_id"`
 			ShippingAddressID *uuid.UUID `json:"shipping_address_id"`
+			CreatedAt         time.Time  `json:"created_at"`
 			Street1           string     `json:"street1"`
 			City              string     `json:"city"`
 			State             string     `json:"state"`
@@ -139,9 +141,11 @@ func (c *CustomerHTTPClient) GetCustomer(ctx context.Context, id uuid.UUID) (*do
 		TaxNumber:         externalCust.TaxNumber,
 		CurrencyCode:      externalCust.CurrencyCode,
 		PaymentTerms:      externalCust.PaymentTerms,
+		SourceSystem:      externalCust.SourceSystem,
 		ServiceAddressID:  externalCust.ServiceAddressID,
 		BillingAddressID:  externalCust.BillingAddressID,
 		ShippingAddressID: externalCust.ShippingAddressID,
+		CreatedAt:         externalCust.CreatedAt,
 		BillingStreet:     externalCust.Street1,
 		BillingCity:       externalCust.City,
 		BillingState:      externalCust.State,

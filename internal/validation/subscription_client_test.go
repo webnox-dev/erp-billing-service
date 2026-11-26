@@ -116,3 +116,17 @@ func TestPickHighestRestrictionLimit(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateCustomerEligibleForModule_FailOpenWithoutDB(t *testing.T) {
+	client := &SubscriptionClient{}
+	allowed, msg, err := client.ValidateCustomerEligibleForModule("org-1", "cust-1", "ims")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !allowed {
+		t.Fatalf("expected allowed=true without db, got false (msg=%q)", msg)
+	}
+	if !strings.Contains(billingCustomerPriorityOrderClause("ims"), "INVENTORY") {
+		t.Fatalf("expected IMS customer priority clause to prioritize INVENTORY")
+	}
+}

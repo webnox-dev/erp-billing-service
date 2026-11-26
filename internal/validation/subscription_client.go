@@ -21,6 +21,7 @@ const (
 	RestrictionKeyMaxBills          = "max_bills"
 	RestrictionKeyMaxVendorCredits = "max_vendor_credits"
 	RestrictionKeyMaxPayments       = "max_payments"
+	RestrictionKeyMaxCustomers      = "max_customers"
 )
 
 // imsRestrictionKeys is the set of restriction keys that belong to IMS/Inventory module.
@@ -259,16 +260,27 @@ func pickHighestRestrictionLimit(values []int) (int, bool) {
 	return best, true
 }
 
-// ValidateRestrictionDetailed checks restriction with full details
-// Returns (allowed, message, limit, currentValue, error)
-func (c *SubscriptionClient) ValidateRestrictionDetailed(orgID, restrictionKey string, optionalModules ...string) (bool, string, int, int, error) {
+func billingCustomerPriorityOrderClause(targetModule string) string {
+	switch targetModule {
+	case "ims":
+		return "CASE WHEN UPPER(COALESCE(source_system, '')) IN ('INVENTORY', 'IMS') THEN 0 ELSE 1 END ASC, created_at ASC, id ASC"
+	case "crm":
+		return "CASE WHEN UPPER(COALESCE(source_system, '')) = 'CRM' THEN 0 ELSE 1 END ASC, created_at ASC, id ASC"
+	case "efs":
+		return "CASE WHEN UPPER(COALESCE(source_system, '')) IN ('FSM', 'EFS', 'MANUAL', '') THEN 0 ELSE 1 END ASC, created_at ASC, id ASC"
+	default:
+		return "created_at ASC, id ASC"
+	}
+}
+
+func (c *SubscriptionClient) resolveBillingRestrictionLimit(orgID, restrictionKey string, optionalModules ...string) (limitValue int, effectiveModule string, found bool) {
 	if c.db == nil {
-		return true, "no db connection — allowed (fail-open)", -1, 0, nil
+		return -1, normalizeBillingModule(optionalModules), false
 	}
 
 	targetModule := normalizeBillingModule(optionalModules)
+	effectiveModule = targetModule
 
-	// 1. Get active subscription from organization_subscriptions_readonly
 	var sub struct {
 		ID         string
 		PlanID     string
@@ -284,10 +296,8 @@ func (c *SubscriptionClient) ValidateRestrictionDetailed(orgID, restrictionKey s
 	now := time.Now().UTC()
 	isExpired := err != nil || isSubscriptionExpired(sub.ID, sub.Status, sub.ExpiryDate, now)
 
-	// 2. Collect non-default (purchased) and default plan_ids with module isolation when specified or inferred
 	var nonDefaultPlanIDs []string
 	var allPlanIDs []string
-	effectiveModule := targetModule
 
 	if isExpired {
 		if targetModule != "" {
@@ -368,8 +378,6 @@ func (c *SubscriptionClient) ValidateRestrictionDetailed(orgID, restrictionKey s
 		}
 	}
 
-	// 3. Query restriction value: prefer explicit non-default purchased plans first;
-	// fallback to all active plan IDs, then to the module/key default plan defining this restriction.
 	lookupRestriction := func(candidatePlanIDs []string) (int, bool) {
 		if len(candidatePlanIDs) == 0 {
 			return 0, false
@@ -394,7 +402,7 @@ func (c *SubscriptionClient) ValidateRestrictionDetailed(orgID, restrictionKey s
 		return restriction.RestrictionValue, true
 	}
 
-	limitValue, found := lookupRestriction(nonDefaultPlanIDs)
+	limitValue, found = lookupRestriction(nonDefaultPlanIDs)
 	if !found {
 		limitValue, found = lookupRestriction(allPlanIDs)
 	}
@@ -408,6 +416,73 @@ func (c *SubscriptionClient) ValidateRestrictionDetailed(orgID, restrictionKey s
 		}
 		limitValue, found = lookupRestriction(defaultCandidates)
 	}
+	return limitValue, effectiveModule, found
+}
+
+// ValidateCustomerEligibleForModule verifies that customerID is within the target module's max_customers plan allowance.
+func (c *SubscriptionClient) ValidateCustomerEligibleForModule(orgID, customerID string, optionalModules ...string) (bool, string, error) {
+	if c == nil || c.db == nil || orgID == "" || customerID == "" {
+		return true, "", nil
+	}
+	targetModule := normalizeBillingModule(optionalModules)
+	if targetModule == "" {
+		return true, "", nil
+	}
+
+	limitValue, effectiveModule, found := c.resolveBillingRestrictionLimit(orgID, RestrictionKeyMaxCustomers, targetModule)
+	if !found || limitValue == -1 {
+		return true, "", nil
+	}
+
+	moduleLabel := formatBillingModuleLabel(effectiveModule)
+	if moduleLabel == "" {
+		moduleLabel = strings.ToUpper(targetModule)
+	}
+
+	if limitValue <= 0 {
+		return false, fmt.Sprintf("Customer plan limit for %s allows 0 customer(s). Please upgrade your subscription to proceed with %s operations.", moduleLabel, moduleLabel), nil
+	}
+
+	var totalActive int64
+	if err := c.db.Table("customers_readonly").
+		Where("organization_id = ? AND deleted_at IS NULL AND LOWER(COALESCE(status, 'active')) != 'inactive'", orgID).
+		Count(&totalActive).Error; err != nil {
+		return true, "", err
+	}
+	if int(totalActive) == 0 {
+		return true, "", nil
+	}
+
+	var eligibleIDs []string
+	if err := c.db.Table("customers_readonly").
+		Where("organization_id = ? AND deleted_at IS NULL AND LOWER(COALESCE(status, 'active')) != 'inactive'", orgID).
+		Order(billingCustomerPriorityOrderClause(targetModule)).
+		Limit(limitValue).
+		Pluck("id", &eligibleIDs).Error; err != nil {
+		return true, "", err
+	}
+
+	for _, id := range eligibleIDs {
+		if strings.EqualFold(id, customerID) {
+			return true, "", nil
+		}
+	}
+
+	if int(totalActive) < limitValue {
+		return true, "", nil
+	}
+
+	return false, fmt.Sprintf("Selected customer exceeds your purchased %s plan allowance (%d/%d customer(s)). Only customers within your %s plan limit are eligible for %s operations. Please upgrade your subscription.", moduleLabel, totalActive, limitValue, moduleLabel, moduleLabel), nil
+}
+
+// ValidateRestrictionDetailed checks restriction with full details
+// Returns (allowed, message, limit, currentValue, error)
+func (c *SubscriptionClient) ValidateRestrictionDetailed(orgID, restrictionKey string, optionalModules ...string) (bool, string, int, int, error) {
+	if c.db == nil {
+		return true, "no db connection — allowed (fail-open)", -1, 0, nil
+	}
+
+	limitValue, effectiveModule, found := c.resolveBillingRestrictionLimit(orgID, restrictionKey, optionalModules...)
 	if !found {
 		return true, "No limit specified", -1, 0, nil
 	}

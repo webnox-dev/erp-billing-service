@@ -96,6 +96,12 @@ func (r *ReadModelRepository) UpsertCustomer(ctx context.Context, rm *domain.Cus
 	if rm.Status != "" {
 		updates["status"] = rm.Status
 	}
+	if rm.SourceSystem != "" {
+		updates["source_system"] = rm.SourceSystem
+	}
+	if !rm.CreatedAt.IsZero() && existing.CreatedAt.IsZero() {
+		updates["created_at"] = rm.CreatedAt
+	}
 	if rm.BillingAddressID != nil {
 		updates["billing_address_id"] = rm.BillingAddressID
 	}

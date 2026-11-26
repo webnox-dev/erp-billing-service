@@ -56,6 +56,14 @@ func (s *SalesOrderService) CreateSalesOrder(req *dto.CreateSalesOrderRequest) (
 
 // CreateSalesOrderWithContext creates a new sales order in draft status using request context
 func (s *SalesOrderService) CreateSalesOrderWithContext(ctx context.Context, req *dto.CreateSalesOrderRequest) (*dto.SalesOrderResponse, error) {
+	sourceSystem := domain.NormalizeSalesOrderSourceSystem(req.SourceSystem)
+	if sourceSystem == "" {
+		sourceSystem = domain.NormalizeSalesOrderSourceSystem(req.Module)
+	}
+	if sourceSystem == "" {
+		sourceSystem = domain.SourceSystemInventory
+	}
+
 	// Subscription limit validation
 	subClient := validation.NewSubscriptionClient()
 	if subClient != nil && req.OrganizationID != uuid.Nil {
@@ -65,6 +73,14 @@ func (s *SalesOrderService) CreateSalesOrderWithContext(ctx context.Context, req
 			log.Printf("[Subscription] Validation error for org %s: %v — allowing (fail-open)", orgIDStr, err)
 		} else if !allowed {
 			return nil, fmt.Errorf("%s", msg)
+		}
+		if sourceSystem == domain.SourceSystemInventory {
+			custAllowed, custMsg, custErr := subClient.ValidateCustomerEligibleForModule(orgIDStr, req.CustomerID.String(), "ims")
+			if custErr != nil {
+				log.Printf("[Subscription] Customer eligibility error for org %s: %v — allowing (fail-open)", orgIDStr, custErr)
+			} else if !custAllowed {
+				return nil, fmt.Errorf("%s", custMsg)
+			}
 		}
 	}
 
@@ -96,15 +112,6 @@ func (s *SalesOrderService) CreateSalesOrderWithContext(ctx context.Context, req
 				return nil, fmt.Errorf("%s", errMsg)
 			}
 		}
-	}
-
-	// Create sales order entity
-	sourceSystem := domain.NormalizeSalesOrderSourceSystem(req.SourceSystem)
-	if sourceSystem == "" {
-		sourceSystem = domain.NormalizeSalesOrderSourceSystem(req.Module)
-	}
-	if sourceSystem == "" {
-		sourceSystem = domain.SourceSystemInventory
 	}
 
 	orderID := uuid.New()
@@ -213,6 +220,16 @@ func (s *SalesOrderService) UpdateSalesOrderWithContext(ctx context.Context, id 
 
 	// Update fields
 	if req.CustomerID != nil {
+		if salesOrder.SourceSystem == domain.SourceSystemInventory || salesOrder.SourceSystem == "" {
+			if subClient := validation.NewSubscriptionClient(); subClient != nil && salesOrder.OrganizationID != uuid.Nil {
+				custAllowed, custMsg, custErr := subClient.ValidateCustomerEligibleForModule(salesOrder.OrganizationID.String(), req.CustomerID.String(), "ims")
+				if custErr != nil {
+					log.Printf("[Subscription] Customer eligibility error for org %s: %v — allowing (fail-open)", salesOrder.OrganizationID, custErr)
+				} else if !custAllowed {
+					return nil, fmt.Errorf("%s", custMsg)
+				}
+			}
+		}
 		salesOrder.CustomerID = *req.CustomerID
 	}
 	if req.ContactID != nil {
@@ -338,6 +355,17 @@ func (s *SalesOrderService) ConfirmSalesOrderWithContext(ctx context.Context, id
 	// Check if can confirm
 	if !salesOrder.CanConfirm() {
 		return nil, fmt.Errorf("cannot confirm sales order in %s status", salesOrder.Status)
+	}
+
+	if salesOrder.SourceSystem == domain.SourceSystemInventory || salesOrder.SourceSystem == "" {
+		if subClient := validation.NewSubscriptionClient(); subClient != nil && salesOrder.OrganizationID != uuid.Nil {
+			custAllowed, custMsg, custErr := subClient.ValidateCustomerEligibleForModule(salesOrder.OrganizationID.String(), salesOrder.CustomerID.String(), "ims")
+			if custErr != nil {
+				log.Printf("[Subscription] Customer eligibility error for org %s: %v — allowing (fail-open)", salesOrder.OrganizationID, custErr)
+			} else if !custAllowed {
+				return nil, fmt.Errorf("%s", custMsg)
+			}
+		}
 	}
 
 	// Generate order number

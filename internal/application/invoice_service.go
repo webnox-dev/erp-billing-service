@@ -14,6 +14,7 @@ import (
 	"erp-billing-service/internal/domain"
 	"erp-billing-service/internal/ports/outbound"
 	"erp-billing-service/internal/ports/repositories"
+	"erp-billing-service/internal/validation"
 
 	shared_events "github.com/efs/shared-events"
 	"github.com/google/uuid"
@@ -148,6 +149,17 @@ func (s *InvoiceService) CreateInvoice(ctx context.Context, orgID uuid.UUID, req
 	sourceSystem := domain.SourceSystemManual
 	if req.SourceSystem != "" {
 		sourceSystem = domain.SourceSystem(req.SourceSystem)
+	}
+
+	if sourceSystem == domain.SourceSystemInventory || strings.EqualFold(string(sourceSystem), "IMS") {
+		if subClient := validation.NewSubscriptionClient(); subClient != nil && orgID != uuid.Nil {
+			custAllowed, custMsg, custErr := subClient.ValidateCustomerEligibleForModule(orgID.String(), req.CustomerID.String(), "ims")
+			if custErr != nil {
+				log.Printf("[Subscription] Customer eligibility error for org %s: %v — allowing (fail-open)", orgID, custErr)
+			} else if !custAllowed {
+				return nil, fmt.Errorf("%s", custMsg)
+			}
+		}
 	}
 
 	// Debug: trace ServiceCategoryID and PartCategoryID at CreateInvoice entry
@@ -702,6 +714,16 @@ func (s *InvoiceService) UpdateInvoice(ctx context.Context, id uuid.UUID, req dt
 	}
 	if len(req.Items) == 0 {
 		return nil, fmt.Errorf("validation error: at least one invoice item is required")
+	}
+	if invoice.SourceSystem == domain.SourceSystemInventory || strings.EqualFold(string(invoice.SourceSystem), "IMS") {
+		if subClient := validation.NewSubscriptionClient(); subClient != nil && invoice.OrganizationID != uuid.Nil {
+			custAllowed, custMsg, custErr := subClient.ValidateCustomerEligibleForModule(invoice.OrganizationID.String(), invoice.CustomerID.String(), "ims")
+			if custErr != nil {
+				log.Printf("[Subscription] Customer eligibility error for org %s: %v — allowing (fail-open)", invoice.OrganizationID, custErr)
+			} else if !custAllowed {
+				return nil, fmt.Errorf("%s", custMsg)
+			}
+		}
 	}
 
 	// 3. Update Fields

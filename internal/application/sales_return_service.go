@@ -75,6 +75,15 @@ func (s *SalesReturnService) CreateSalesReturn(req *dto.CreateSalesReturnRequest
 		return nil, fmt.Errorf("sales order must be delivered to create a return (current status: %s)", salesOrder.Status)
 	}
 
+	if (salesOrder.SourceSystem == domain.SourceSystemInventory || salesOrder.SourceSystem == "") && subClient != nil && req.OrganizationID != uuid.Nil {
+		custAllowed, custMsg, custErr := subClient.ValidateCustomerEligibleForModule(req.OrganizationID.String(), salesOrder.CustomerID.String(), "ims")
+		if custErr != nil {
+			log.Printf("[Subscription] Customer eligibility error for org %s: %v — allowing (fail-open)", req.OrganizationID, custErr)
+		} else if !custAllowed {
+			return nil, fmt.Errorf("%s", custMsg)
+		}
+	}
+
 	// Create sales return entity
 	salesReturn := &domain.SalesReturn{
 		ID:             uuid.New(),
