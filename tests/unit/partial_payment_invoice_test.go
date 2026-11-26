@@ -204,3 +204,67 @@ func TestGeneratePartialInvoicePDF_IncludesPartialBreakdownAndPreviousPaid(t *te
 		t.Fatalf("expected valid PDF bytes, err=%v", err)
 	}
 }
+
+func TestGeneratePartialInvoicePDFWithSettings_SignatureAndGSTBreakdown(t *testing.T) {
+	pdfSvc := application.NewPDFService(t.TempDir())
+	orgID := uuid.New()
+	custID := uuid.New()
+	partNum := "EFS-2026-0005"
+
+	inv := &domain.Invoice{
+		ID:                  uuid.New(),
+		OrganizationID:      orgID,
+		CustomerID:          custID,
+		InvoiceNumber:       &partNum,
+		IsPartialInvoice:    true,
+		InvoiceDate:         time.Date(2026, 11, 24, 0, 0, 0, 0, time.UTC),
+		DueDate:             time.Date(2026, 11, 30, 0, 0, 0, 0, time.UTC),
+		Status:              domain.InvoiceStatusPaid,
+		Currency:            "INR",
+		SubTotal:            1000,
+		DiscountTotal:       0,
+		TaxTotal:            180,
+		ExciseDuty:          20,
+		TotalAmount:         1200,
+		PaidAmount:          1200,
+		ActualSubTotal:      2500,
+		ActualAmount:        3000,
+		PreviousPaidAmount:  1800,
+		ActualTaxTotal:      450,
+		ActualExciseDuty:    50,
+		OrderBalanceAmount:  0,
+	}
+
+	// 1x1 transparent PNG base64 data URI
+	tinyPNG := "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+	settings := &domain.InvoiceSettings{
+		OrganizationID:     orgID,
+		ShowSignature:      true,
+		SignatureMandatory: true,
+		SignatoryName:      "Jane Signatory",
+		SignatoryTitle:     "Finance Director",
+		SignatureLabel:     "Authorized Signature",
+		SignatureImage:     tinyPNG,
+		ShowGSTBreakdown:   true,
+		GSTMode:            "cgst_sgst",
+	}
+
+	pdfPath, err := pdfSvc.GenerateInvoicePDFWithSettings(
+		context.Background(),
+		inv,
+		&domain.CustomerRM{DisplayName: "Customer One", BillingState: "Tamil Nadu"},
+		&domain.OrganizationRM{OrganizationName: "Registered Co", State: "Tamil Nadu"},
+		nil,
+		nil,
+		nil,
+		"Fallback Author",
+		settings,
+	)
+	if err != nil {
+		t.Fatalf("GenerateInvoicePDFWithSettings failed: %v", err)
+	}
+	b, err := os.ReadFile(pdfPath)
+	if err != nil || !strings.HasPrefix(string(b), "%PDF-") {
+		t.Fatalf("expected valid PDF bytes, err=%v", err)
+	}
+}

@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"erp-billing-service/internal/domain"
@@ -293,8 +294,18 @@ func (r *InvoiceRepository) Delete(ctx context.Context, id uuid.UUID) error {
 }
 
 func (r *InvoiceRepository) GetNextInvoiceNumber(ctx context.Context, orgID uuid.UUID) (string, error) {
+	return r.GetNextInvoiceNumberWithPrefix(ctx, orgID, "INV")
+}
+
+func (r *InvoiceRepository) GetNextInvoiceNumberWithPrefix(ctx context.Context, orgID uuid.UUID, customPrefix string) (string, error) {
+	cleanPrefix := strings.ToUpper(strings.TrimSpace(customPrefix))
+	cleanPrefix = strings.TrimSuffix(cleanPrefix, "-")
+	if cleanPrefix == "" {
+		cleanPrefix = "INV"
+	}
+
 	year := time.Now().Year()
-	prefix := fmt.Sprintf("INV-%d-", year)
+	prefix := fmt.Sprintf("%s-%d-", cleanPrefix, year)
 
 	var invoiceNumbers []string
 	err := r.db.WithContext(ctx).Unscoped().Model(&domain.Invoice{}).
@@ -307,13 +318,12 @@ func (r *InvoiceRepository) GetNextInvoiceNumber(ctx context.Context, orgID uuid
 	maxSeq := 0
 	for _, num := range invoiceNumbers {
 		var y, seq int
-		_, err := fmt.Sscanf(num, "INV-%d-%d", &y, &seq)
-		if err == nil && seq > maxSeq {
+		if _, err := fmt.Sscanf(num, cleanPrefix+"-%d-%d", &y, &seq); err == nil && seq > maxSeq {
 			maxSeq = seq
 		}
 	}
 
-	return fmt.Sprintf("INV-%d-%04d", year, maxSeq+1), nil
+	return fmt.Sprintf("%s-%d-%04d", cleanPrefix, year, maxSeq+1), nil
 }
 
 func (r *InvoiceRepository) ClearItems(ctx context.Context, invoiceID uuid.UUID) error {

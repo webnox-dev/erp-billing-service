@@ -91,11 +91,13 @@ type InvoiceResponse struct {
 	ParentInvoiceID     *uuid.UUID               `json:"parent_invoice_id,omitempty"`
 	ParentInvoiceNumber *string                  `json:"parent_invoice_number,omitempty"`
 	IsPartialInvoice    bool                     `json:"is_partial_invoice"`
+	ActualSubTotal      float64                  `json:"actual_sub_total,omitempty"`
 	ActualAmount        float64                  `json:"actual_amount,omitempty"`
 	PreviousPaidAmount  float64                  `json:"previous_paid_amount,omitempty"`
 	ActualDiscountTotal float64                  `json:"actual_discount_total,omitempty"`
 	ActualTaxTotal      float64                  `json:"actual_tax_total,omitempty"`
 	ActualAdjustment    float64                  `json:"actual_adjustment,omitempty"`
+	ActualExciseDuty    float64                  `json:"actual_excise_duty,omitempty"`
 	OrderBalanceAmount  float64                  `json:"order_balance_amount,omitempty"`
 	PreviousPayments    []PaymentResponse        `json:"previous_payments,omitempty"`
 	ChildInvoices       []InvoiceSummaryResponse `json:"child_invoices,omitempty"`

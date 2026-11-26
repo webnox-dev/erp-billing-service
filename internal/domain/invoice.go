@@ -80,11 +80,13 @@ type Invoice struct {
 	ParentInvoiceID     *uuid.UUID `gorm:"type:uuid;index" json:"parent_invoice_id,omitempty"`
 	ParentInvoiceNumber *string    `gorm:"type:varchar(50)" json:"parent_invoice_number,omitempty"`
 	IsPartialInvoice    bool       `gorm:"default:false;index" json:"is_partial_invoice"`
+	ActualSubTotal      float64    `gorm:"type:decimal(15,2);default:0" json:"actual_sub_total"`
 	ActualAmount        float64    `gorm:"type:decimal(15,2);default:0" json:"actual_amount"`
 	PreviousPaidAmount  float64    `gorm:"type:decimal(15,2);default:0" json:"previous_paid_amount"`
 	ActualDiscountTotal float64    `gorm:"type:decimal(15,2);default:0" json:"actual_discount_total"`
 	ActualTaxTotal      float64    `gorm:"type:decimal(15,2);default:0" json:"actual_tax_total"`
 	ActualAdjustment    float64    `gorm:"type:decimal(15,2);default:0" json:"actual_adjustment"`
+	ActualExciseDuty    float64    `gorm:"type:decimal(15,2);default:0" json:"actual_excise_duty"`
 	OrderBalanceAmount  float64    `gorm:"type:decimal(15,2);default:0" json:"order_balance_amount"`
 	PreviousPayments    []Payment  `gorm:"-" json:"previous_payments,omitempty"`
 	ChildInvoices       []Invoice  `gorm:"-" json:"child_invoices,omitempty"`

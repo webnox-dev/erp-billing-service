@@ -149,6 +149,7 @@ func AutoMigrate(db *gorm.DB) error {
 	err := db.AutoMigrate(
 		&domain.Invoice{},
 		&domain.InvoiceItem{},
+		&domain.InvoiceSettings{},
 		&domain.Payment{},
 		&domain.CustomerRM{},
 		&domain.ContactRM{},

@@ -57,6 +57,7 @@ func main() {
 
 	// 5. Initialize Repositories
 	invoiceRepo := postgres.NewInvoiceRepository(db)
+	invoiceSettingsRepo := postgres.NewInvoiceSettingsRepository(db)
 	paymentRepo := postgres.NewPaymentRepository(db)
 	auditRepo := postgres.NewAuditLogRepository(db)
 	rmRepo := postgres.NewReadModelRepository(db, cfg.InventoryServiceHTTPURL)
@@ -116,7 +117,10 @@ func main() {
 
 	// 6. Initialize Services
 	invoiceService := application.NewInvoiceService(invoiceRepo, rmRepo, auditRepo, eventPublisher, pdfService, s3Service, inventoryClient, customerClient, orgClient, salesOrderRepo)
+	invoiceService.SetSettingsRepository(invoiceSettingsRepo)
+	invoiceSettingsService := application.NewInvoiceSettingsService(invoiceSettingsRepo)
 	paymentService := application.NewPaymentService(paymentRepo, invoiceRepo, salesOrderRepo, rmRepo, auditRepo, eventPublisher, customerClient)
+	paymentService.SetSettingsRepository(invoiceSettingsRepo)
 	salesOrderService := application.NewSalesOrderService(salesOrderRepo, invoiceRepo, rmRepo, eventPublisher, inventoryClient, customerClient, pdfService)
 	salesReturnService := application.NewSalesReturnService(salesReturnRepo, salesOrderRepo, invoiceRepo, paymentRepo, rmRepo, eventPublisher, inventoryClient)
 	subscriptionService := application.NewSubscriptionService(subscriptionRepo, invoiceRepo, paymentRepo, rmRepo, eventPublisher, razorpayClient)
@@ -156,6 +160,7 @@ func main() {
 
 	// 8. Initialize HTTP Handlers
 	invoiceHandler := billing_http.NewInvoiceHandler(invoiceService)
+	invoiceSettingsHandler := billing_http.NewInvoiceSettingsHandler(invoiceSettingsService)
 	paymentHandler := billing_http.NewPaymentHandler(paymentService)
 	salesOrderHandler := billing_http.NewSalesOrderHandler(salesOrderService)
 	salesReturnHandler := billing_http.NewSalesReturnHandler(salesReturnService)
@@ -185,6 +190,10 @@ func main() {
 
 	// Razorpay Webhook Route
 	api.HandleFunc("/billing/webhooks/razorpay", razorpayWebhookHandler.HandleWebhook).Methods("POST")
+
+	// Invoice Settings Routes
+	api.HandleFunc("/billing/invoice-settings", invoiceSettingsHandler.GetInvoiceSettings).Methods("GET")
+	api.HandleFunc("/billing/invoice-settings", invoiceSettingsHandler.UpdateInvoiceSettings).Methods("PUT")
 
 	// Invoice Routes
 	api.HandleFunc("/billing/invoices", invoiceHandler.CreateInvoice).Methods("POST")

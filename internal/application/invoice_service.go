@@ -33,7 +33,79 @@ type InvoiceService struct {
 	customerClient  outbound.CustomerClient
 	orgClient       outbound.OrganizationClient
 	salesOrderRepo  repositories.SalesOrderRepository
+	settingsRepo    domain.InvoiceSettingsRepository
 	pdfGroup        singleflight.Group
+}
+
+// SetSettingsRepository attaches the per-organization invoice configuration repository.
+func (s *InvoiceService) SetSettingsRepository(repo domain.InvoiceSettingsRepository) {
+	s.settingsRepo = repo
+}
+
+func (s *InvoiceService) getInvoiceSettings(ctx context.Context, orgID uuid.UUID) *domain.InvoiceSettings {
+	if s.settingsRepo == nil || orgID == uuid.Nil {
+		return nil
+	}
+	settings, err := s.settingsRepo.GetByOrganizationID(ctx, orgID)
+	if err != nil {
+		return nil
+	}
+	return settings
+}
+
+func (s *InvoiceService) enrichOrgFromSettings(org *domain.OrganizationRM, settings *domain.InvoiceSettings) *domain.OrganizationRM {
+	if settings == nil {
+		return org
+	}
+	if org == nil {
+		org = &domain.OrganizationRM{ID: settings.OrganizationID}
+	}
+	copyOrg := *org
+	if strings.TrimSpace(settings.CompanyName) != "" && (strings.TrimSpace(copyOrg.OrganizationName) == "" || copyOrg.OrganizationName == "YOUR COMPANY NAME") {
+		copyOrg.OrganizationName = strings.TrimSpace(settings.CompanyName)
+	}
+	if strings.TrimSpace(settings.CompanyAddress) != "" && (strings.TrimSpace(copyOrg.Address) == "" || copyOrg.Address == "Your Company Address Line 1") {
+		copyOrg.Address = strings.TrimSpace(settings.CompanyAddress)
+	}
+	if strings.TrimSpace(settings.CompanyCity) != "" && (strings.TrimSpace(copyOrg.City) == "" || copyOrg.City == "City") {
+		copyOrg.City = strings.TrimSpace(settings.CompanyCity)
+	}
+	if strings.TrimSpace(settings.CompanyState) != "" && (strings.TrimSpace(copyOrg.State) == "" || copyOrg.State == "State") {
+		copyOrg.State = strings.TrimSpace(settings.CompanyState)
+	}
+	if strings.TrimSpace(settings.CompanyZipCode) != "" && (strings.TrimSpace(copyOrg.ZipCode) == "" || copyOrg.ZipCode == "ZIP") {
+		copyOrg.ZipCode = strings.TrimSpace(settings.CompanyZipCode)
+	}
+	if strings.TrimSpace(settings.CompanyCountry) != "" && (strings.TrimSpace(copyOrg.Country) == "" || copyOrg.Country == "Country") {
+		copyOrg.Country = strings.TrimSpace(settings.CompanyCountry)
+	}
+	if strings.TrimSpace(settings.CompanyPhone) != "" && (strings.TrimSpace(copyOrg.Phone) == "" || copyOrg.Phone == "(123) 456-7890") {
+		copyOrg.Phone = strings.TrimSpace(settings.CompanyPhone)
+	}
+	if strings.TrimSpace(settings.CompanyEmail) != "" && strings.TrimSpace(copyOrg.Email) == "" {
+		copyOrg.Email = strings.TrimSpace(settings.CompanyEmail)
+	}
+	if strings.TrimSpace(settings.CompanyWebsite) != "" && (strings.TrimSpace(copyOrg.Website) == "" || copyOrg.Website == "www.yourcompany.com") {
+		copyOrg.Website = strings.TrimSpace(settings.CompanyWebsite)
+	}
+	if strings.TrimSpace(settings.CompanyGSTIN) != "" && strings.TrimSpace(copyOrg.GSTIN) == "" {
+		copyOrg.GSTIN = strings.TrimSpace(settings.CompanyGSTIN)
+	}
+	if strings.TrimSpace(settings.CompanyLogoURL) != "" && strings.TrimSpace(copyOrg.IconURL) == "" {
+		copyOrg.IconURL = strings.TrimSpace(settings.CompanyLogoURL)
+	}
+	return &copyOrg
+}
+
+func (s *InvoiceService) getNextInvoiceNumberWithSettings(ctx context.Context, orgID uuid.UUID, settings *domain.InvoiceSettings) (string, error) {
+	if settings != nil && strings.TrimSpace(settings.InvoicePrefix) != "" {
+		if pRepo, ok := s.invoiceRepo.(interface {
+			GetNextInvoiceNumberWithPrefix(context.Context, uuid.UUID, string) (string, error)
+		}); ok {
+			return pRepo.GetNextInvoiceNumberWithPrefix(ctx, orgID, settings.InvoicePrefix)
+		}
+	}
+	return s.invoiceRepo.GetNextInvoiceNumber(ctx, orgID)
 }
 
 func NewInvoiceService(
@@ -780,8 +852,16 @@ func (s *InvoiceService) SendInvoice(ctx context.Context, id uuid.UUID, req dto.
 		return nil, err
 	}
 
+	// 2c. Validate mandatory signature setting if enabled
+	settings := s.getInvoiceSettings(ctxWithOrg, invoice.OrganizationID)
+	if settings != nil && settings.SignatureMandatory {
+		if strings.TrimSpace(settings.SignatureImage) == "" && strings.TrimSpace(settings.SignatoryName) == "" {
+			return nil, fmt.Errorf("cannot send invoice: authorized signature is mandatory — please configure a signature in Settings > Invoice Config")
+		}
+	}
+
 	// 3. Generate invoice number
-	invNum, err := s.invoiceRepo.GetNextInvoiceNumber(ctx, invoice.OrganizationID)
+	invNum, err := s.getNextInvoiceNumberWithSettings(ctx, invoice.OrganizationID, settings)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate invoice number: %w", err)
 	}
@@ -789,10 +869,11 @@ func (s *InvoiceService) SendInvoice(ctx context.Context, id uuid.UUID, req dto.
 
 	// 4. Generate PDF
 	customer, org := s.resolveInvoicePartyDetails(ctx, invoice)
+	org = s.enrichOrgFromSettings(org, settings)
 	authorName := s.getAuthorName(ctx, invoice, org)
 
 	wo, appts, techs := s.getFSMDetails(ctx, invoice)
-	pdfPath, err := s.pdfService.GenerateInvoicePDF(ctx, invoice, customer, org, wo, appts, techs, authorName)
+	pdfPath, err := s.pdfService.GenerateInvoicePDFWithSettings(ctx, invoice, customer, org, wo, appts, techs, authorName, settings)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate PDF: %w", err)
 	}
@@ -923,10 +1004,12 @@ func (s *InvoiceService) generateInvoicePDFInternal(ctx context.Context, id uuid
 	// 3. We always regenerate for now to ensure payments/status are up to date
 	// In production, we might want to check if the PDF is older than the last updated_at
 
+	settings := s.getInvoiceSettings(ctx, invoice.OrganizationID)
+
 	// 4. Generate PDF (or regenerate for draft invoices)
 	// Generate invoice number if missing (for draft invoices)
 	if invoice.InvoiceNumber == nil {
-		invNum, err := s.invoiceRepo.GetNextInvoiceNumber(ctx, invoice.OrganizationID)
+		invNum, err := s.getNextInvoiceNumberWithSettings(ctx, invoice.OrganizationID, settings)
 		if err != nil {
 			return "", fmt.Errorf("failed to generate invoice number: %w", err)
 		}
@@ -934,10 +1017,11 @@ func (s *InvoiceService) generateInvoicePDFInternal(ctx context.Context, id uuid
 	}
 
 	customer, org := s.resolveInvoicePartyDetails(ctx, invoice)
+	org = s.enrichOrgFromSettings(org, settings)
 	authorName := s.getAuthorName(ctx, invoice, org)
 
 	wo, appts, techs := s.getFSMDetails(ctx, invoice)
-	pdfPath, err := s.pdfService.GenerateInvoicePDF(ctx, invoice, customer, org, wo, appts, techs, authorName)
+	pdfPath, err := s.pdfService.GenerateInvoicePDFWithSettings(ctx, invoice, customer, org, wo, appts, techs, authorName, settings)
 	if err != nil {
 		return "", fmt.Errorf("failed to generate PDF: %w", err)
 	}
@@ -1202,11 +1286,13 @@ func (s *InvoiceService) mapToResponse(ctx context.Context, inv *domain.Invoice)
 		ParentInvoiceID:     inv.ParentInvoiceID,
 		ParentInvoiceNumber: inv.ParentInvoiceNumber,
 		IsPartialInvoice:    inv.IsPartialInvoice,
+		ActualSubTotal:      inv.ActualSubTotal,
 		ActualAmount:        inv.ActualAmount,
 		PreviousPaidAmount:  inv.PreviousPaidAmount,
 		ActualDiscountTotal: inv.ActualDiscountTotal,
 		ActualTaxTotal:      inv.ActualTaxTotal,
 		ActualAdjustment:    inv.ActualAdjustment,
+		ActualExciseDuty:    inv.ActualExciseDuty,
 		OrderBalanceAmount:  inv.OrderBalanceAmount,
 		OwnerID:         inv.OwnerID,
 		CustomerID:        inv.CustomerID,
@@ -1310,7 +1396,10 @@ func (s *InvoiceService) mapToResponse(ctx context.Context, inv *domain.Invoice)
 		}
 	}
 
-	if org, err := s.getOrganization(ctx, inv.OrganizationID); err == nil && org != nil && org.OrganizationName != "" {
+	settings := s.getInvoiceSettings(ctxWithOrg, inv.OrganizationID)
+	org, _ := s.getOrganization(ctx, inv.OrganizationID)
+	org = s.enrichOrgFromSettings(org, settings)
+	if org != nil && org.OrganizationName != "" && org.OrganizationName != "YOUR COMPANY NAME" {
 		res.Organization = &dto.OrganizationResponse{
 			ID:               org.ID,
 			OrganizationName: org.OrganizationName,
@@ -1328,6 +1417,9 @@ func (s *InvoiceService) mapToResponse(ctx context.Context, inv *domain.Invoice)
 		res.AuthorName = s.getAuthorName(ctx, inv, org)
 	} else {
 		res.AuthorName = s.getAuthorName(ctx, inv, nil)
+	}
+	if settings != nil && strings.TrimSpace(settings.SignatoryName) != "" {
+		res.AuthorName = strings.TrimSpace(settings.SignatoryName)
 	}
 
 	mapPayment := func(p domain.Payment) dto.PaymentResponse {

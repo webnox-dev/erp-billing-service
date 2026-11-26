@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"strings"
 	"time"
 
 	"erp-billing-service/internal/application/dto"
@@ -25,6 +26,12 @@ type PaymentService struct {
 	auditRepo      domain.AuditLogRepository
 	eventPublisher domain.EventPublisher
 	customerClient outbound.CustomerClient
+	settingsRepo   domain.InvoiceSettingsRepository
+}
+
+// SetSettingsRepository injects invoice settings repository for prefix lookup without breaking existing constructors.
+func (s *PaymentService) SetSettingsRepository(repo domain.InvoiceSettingsRepository) {
+	s.settingsRepo = repo
 }
 
 // NewPaymentService creates a new payment service
@@ -69,6 +76,13 @@ func BuildPartialPaymentInvoice(
 	prevPaid = roundCurrency(prevPaid)
 
 	var subTotal, discountTotal, taxTotal, adjustment, exciseDuty, tdsAmt, tcsAmt float64
+	parentTaxTotal := parent.TaxTotal
+	if parentTaxTotal == 0 && len(parent.Items) > 0 {
+		for _, it := range parent.Items {
+			parentTaxTotal += it.Tax
+		}
+		parentTaxTotal = roundCurrency(parentTaxTotal)
+	}
 	isFinalInstallment := len(priorPartials) > 0 && (prevPaid+paidAmt >= parent.TotalAmount-0.01)
 
 	if isFinalInstallment {
@@ -87,7 +101,7 @@ func BuildPartialPaymentInvoice(
 		}
 		subTotal = roundCurrency(parent.SubTotal - usedSub)
 		discountTotal = roundCurrency(parent.DiscountTotal - usedDisc)
-		taxTotal = roundCurrency(parent.TaxTotal - usedTax)
+		taxTotal = roundCurrency(parentTaxTotal - usedTax)
 		adjustment = roundCurrency(parent.Adjustment - usedAdj)
 		exciseDuty = roundCurrency(parent.ExciseDuty - usedExc)
 		tdsAmt = roundCurrency(parent.TDSAmount - usedTDS)
@@ -99,14 +113,14 @@ func BuildPartialPaymentInvoice(
 		}
 		subTotal = roundCurrency(parent.SubTotal * ratio)
 		discountTotal = roundCurrency(parent.DiscountTotal * ratio)
-		taxTotal = roundCurrency(parent.TaxTotal * ratio)
+		taxTotal = roundCurrency(parentTaxTotal * ratio)
 		adjustment = roundCurrency(parent.Adjustment * ratio)
 		exciseDuty = roundCurrency(parent.ExciseDuty * ratio)
 		tdsAmt = roundCurrency(parent.TDSAmount * ratio)
 		tcsAmt = roundCurrency(parent.TCSAmount * ratio)
 	}
 
-	computedTotal := roundCurrency(subTotal - discountTotal + taxTotal + adjustment + exciseDuty)
+	computedTotal := roundCurrency(subTotal - discountTotal + taxTotal - tdsAmt + tcsAmt + adjustment + exciseDuty)
 	if diff := roundCurrency(paidAmt - computedTotal); math.Abs(diff) > 0 && math.Abs(diff) <= 0.05 {
 		subTotal = roundCurrency(subTotal + diff)
 	}
@@ -115,8 +129,14 @@ func BuildPartialPaymentInvoice(
 	if parent.TotalAmount > 0 {
 		ratio = paidAmt / parent.TotalAmount
 	}
+	itemTaxSum := 0.0
 	items := make([]domain.InvoiceItem, 0, len(parent.Items))
 	for _, orig := range parent.Items {
+		itemTax := roundCurrency(orig.Tax * ratio)
+		itemDisc := roundCurrency(orig.Discount * ratio)
+		itemPrice := roundCurrency(orig.UnitPrice * ratio)
+		itemTotal := roundCurrency(orig.Total * ratio)
+		itemTaxSum = roundCurrency(itemTaxSum + itemTax)
 		items = append(items, domain.InvoiceItem{
 			ID:                uuid.New(),
 			InvoiceID:         partialID,
@@ -125,16 +145,22 @@ func BuildPartialPaymentInvoice(
 			Name:              orig.Name,
 			Description:       orig.Description,
 			Quantity:          orig.Quantity,
-			UnitPrice:         roundCurrency(orig.UnitPrice * ratio),
-			Discount:          roundCurrency(orig.Discount * ratio),
-			Tax:               roundCurrency(orig.Tax * ratio),
-			Total:             roundCurrency(orig.Total * ratio),
+			UnitPrice:         itemPrice,
+			Discount:          itemDisc,
+			Tax:               itemTax,
+			Total:             itemTotal,
 			ServiceCategoryID: orig.ServiceCategoryID,
 			PartCategoryID:    orig.PartCategoryID,
 			Metadata:          orig.Metadata,
 			CreatedAt:         now,
 			UpdatedAt:         now,
 		})
+	}
+	if len(items) > 0 && taxTotal > 0 {
+		if taxDiff := roundCurrency(taxTotal - itemTaxSum); math.Abs(taxDiff) > 0 && math.Abs(taxDiff) <= 0.05 {
+			items[len(items)-1].Tax = roundCurrency(items[len(items)-1].Tax + taxDiff)
+			items[len(items)-1].Total = roundCurrency(items[len(items)-1].Total + taxDiff)
+		}
 	}
 
 	installmentNum := 1
@@ -202,11 +228,13 @@ func BuildPartialPaymentInvoice(
 		ParentInvoiceID:     &parent.ID,
 		ParentInvoiceNumber: parent.InvoiceNumber,
 		IsPartialInvoice:    true,
+		ActualSubTotal:      parent.SubTotal,
 		ActualAmount:        parent.TotalAmount,
 		PreviousPaidAmount:  prevPaid,
 		ActualDiscountTotal: parent.DiscountTotal,
-		ActualTaxTotal:      parent.TaxTotal,
+		ActualTaxTotal:      parentTaxTotal,
 		ActualAdjustment:    parent.Adjustment,
+		ActualExciseDuty:    parent.ExciseDuty,
 		OrderBalanceAmount:  remainingOrderBalance,
 		Items:               items,
 		CreatedAt:           now,
@@ -272,9 +300,22 @@ func (s *PaymentService) RecordPayment(ctx context.Context, req dto.RecordPaymen
 	var partialInv *domain.Invoice
 	if isPartialFlow {
 		priorPartials, _ := s.invoiceRepo.ListByParentInvoiceID(ctx, invoice.ID)
-		partialNum, err := s.invoiceRepo.GetNextInvoiceNumber(ctx, invoice.OrganizationID)
-		if err != nil {
-			return nil, fmt.Errorf("failed to generate partial invoice number: %w", err)
+		var partialNum string
+		var numErr error
+		if s.settingsRepo != nil {
+			if cfg, cfgErr := s.settingsRepo.GetByOrganizationID(ctx, invoice.OrganizationID); cfgErr == nil && cfg != nil && strings.TrimSpace(cfg.InvoicePrefix) != "" {
+				if pRepo, ok := s.invoiceRepo.(interface {
+					GetNextInvoiceNumberWithPrefix(context.Context, uuid.UUID, string) (string, error)
+				}); ok {
+					partialNum, numErr = pRepo.GetNextInvoiceNumberWithPrefix(ctx, invoice.OrganizationID, cfg.InvoicePrefix)
+				}
+			}
+		}
+		if partialNum == "" && numErr == nil {
+			partialNum, numErr = s.invoiceRepo.GetNextInvoiceNumber(ctx, invoice.OrganizationID)
+		}
+		if numErr != nil {
+			return nil, fmt.Errorf("failed to generate partial invoice number: %w", numErr)
 		}
 		partialInv = BuildPartialPaymentInvoice(invoice, paymentDate, partialNum, req.Amount, prevPaid, priorPartials, resolvedSalesOrder)
 		if err := s.invoiceRepo.Create(ctx, partialInv); err != nil {

@@ -3,6 +3,7 @@ package application
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"image"
 	"image/draw"
@@ -10,6 +11,7 @@ import (
 	_ "image/jpeg"
 	png "image/png"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -38,6 +40,20 @@ func (s *PDFService) GenerateInvoicePDF(
 	appointments []domain.ServiceAppointmentRM,
 	technicians []domain.UserReadOnly,
 	authorName string,
+) (string, error) {
+	return s.GenerateInvoicePDFWithSettings(ctx, invoice, customer, organization, workOrder, appointments, technicians, authorName, nil)
+}
+
+func (s *PDFService) GenerateInvoicePDFWithSettings(
+	ctx context.Context,
+	invoice *domain.Invoice,
+	customer *domain.CustomerRM,
+	organization *domain.OrganizationRM,
+	workOrder *domain.WorkOrderRM,
+	appointments []domain.ServiceAppointmentRM,
+	technicians []domain.UserReadOnly,
+	authorName string,
+	settings *domain.InvoiceSettings,
 ) (string, error) {
 	orgDir := filepath.Join(s.storageBasePath, invoice.OrganizationID.String())
 	if err := os.MkdirAll(orgDir, 0755); err != nil {
@@ -1175,10 +1191,47 @@ func (s *PDFService) GenerateInvoicePDF(
 		pdf.CellFormat(valWidth - 40, rowH, fmt.Sprintf("-%s%.2f", currencySymbol, invoice.DiscountTotal), "", 1, "R", false, 0, "")
 	}
 
-	if invoice.TaxTotal > 0 {
-		pdf.SetX(labelX)
-		pdf.Cell(40, rowH, "Tax Total")
-		pdf.CellFormat(valWidth - 40, rowH, fmt.Sprintf("+%s%.2f", currencySymbol, invoice.TaxTotal), "", 1, "R", false, 0, "")
+	effectiveTaxTotal := invoice.TaxTotal
+	if effectiveTaxTotal == 0 && len(invoice.Items) > 0 {
+		for _, it := range invoice.Items {
+			effectiveTaxTotal += it.Tax
+		}
+		effectiveTaxTotal = math.Round(effectiveTaxTotal*100) / 100
+	}
+
+	showGSTBreakdown, isInterState := resolveInvoiceGSTMode(organization, invoice, customer, settings)
+
+	if effectiveTaxTotal > 0 {
+		if showGSTBreakdown {
+			taxableBase := invoice.SubTotal - invoice.DiscountTotal
+			gstPct := 0.0
+			if taxableBase > 0 {
+				gstPct = (effectiveTaxTotal / taxableBase) * 100.0
+			}
+			cgst, sgst, igst := splitGSTAmount(effectiveTaxTotal, isInterState)
+			if isInterState {
+				pdf.SetX(labelX)
+				pdf.Cell(40, rowH, fmt.Sprintf("IGST (%.2f%%)", gstPct))
+				pdf.CellFormat(valWidth-40, rowH, fmt.Sprintf("+%s%.2f", currencySymbol, igst), "", 1, "R", false, 0, "")
+			} else {
+				halfPct := gstPct / 2.0
+				pdf.SetX(labelX)
+				pdf.Cell(40, rowH, fmt.Sprintf("CGST (%.2f%%)", halfPct))
+				pdf.CellFormat(valWidth-40, rowH, fmt.Sprintf("+%s%.2f", currencySymbol, cgst), "", 1, "R", false, 0, "")
+				pdf.SetX(labelX)
+				pdf.Cell(40, rowH, fmt.Sprintf("SGST (%.2f%%)", halfPct))
+				pdf.CellFormat(valWidth-40, rowH, fmt.Sprintf("+%s%.2f", currencySymbol, sgst), "", 1, "R", false, 0, "")
+			}
+			pdf.SetX(labelX)
+			pdf.SetFont("Arial", "B", 9)
+			pdf.Cell(40, rowH, "Total GST")
+			pdf.CellFormat(valWidth-40, rowH, fmt.Sprintf("+%s%.2f", currencySymbol, effectiveTaxTotal), "", 1, "R", false, 0, "")
+			pdf.SetFont("Arial", "", 9)
+		} else {
+			pdf.SetX(labelX)
+			pdf.Cell(40, rowH, "Tax Total")
+			pdf.CellFormat(valWidth-40, rowH, fmt.Sprintf("+%s%.2f", currencySymbol, effectiveTaxTotal), "", 1, "R", false, 0, "")
+		}
 	}
 
 	if invoice.ExciseDuty > 0 {
@@ -1259,45 +1312,81 @@ func (s *PDFService) GenerateInvoicePDF(
 		if invoice.IsPartialInvoice && invoice.ActualAmount > 0 {
 			actualTotal = invoice.ActualAmount
 		}
+		actualSubTotal := invoice.SubTotal
 		actualDiscount := invoice.DiscountTotal
-		actualTax := invoice.TaxTotal
+		actualTax := effectiveTaxTotal
 		actualAdj := invoice.Adjustment
+		actualExcise := invoice.ExciseDuty
 		if invoice.IsPartialInvoice {
 			actualDiscount = invoice.ActualDiscountTotal
 			actualTax = invoice.ActualTaxTotal
+			if actualTax == 0 && effectiveTaxTotal > 0 && actualTotal > 0 && invoice.PaidAmount > 0 {
+				actualTax = math.Round((effectiveTaxTotal*(actualTotal/invoice.PaidAmount))*100) / 100
+			}
 			actualAdj = invoice.ActualAdjustment
+			if invoice.ActualSubTotal > 0 {
+				actualSubTotal = invoice.ActualSubTotal
+			} else if actualTotal > 0 && invoice.PaidAmount > 0 {
+				actualSubTotal = math.Round((invoice.SubTotal*(actualTotal/invoice.PaidAmount))*100) / 100
+			}
+			if invoice.ActualExciseDuty > 0 {
+				actualExcise = invoice.ActualExciseDuty
+			} else if invoice.ExciseDuty > 0 && actualTotal > 0 && invoice.PaidAmount > 0 {
+				actualExcise = math.Round((invoice.ExciseDuty*(actualTotal/invoice.PaidAmount))*100) / 100
+			}
 		}
 
 		paidNow := invoice.PaidAmount
 		prevPaid := invoice.PreviousPaidAmount
-		if !invoice.IsPartialInvoice && len(activePayments) > 1 {
-			prevSum := 0.0
-			for i := 0; i < len(activePayments)-1; i++ {
-				prevSum += activePayments[i].Amount
+		if !invoice.IsPartialInvoice && len(activePayments) > 0 {
+			latestAmt := activePayments[len(activePayments)-1].Amount
+			paidNow = latestAmt
+			prevPaid = invoice.PaidAmount - latestAmt
+			if prevPaid < 0 {
+				prevPaid = 0
 			}
-			prevPaid = prevSum
 		}
 
-		var gstOnPaid, discountOnPaid, adjOnPaid, taxableOnPaid float64
+		var subOnPaid, gstOnPaid, discountOnPaid, adjOnPaid, exciseOnPaid, tdsOnPaid, tcsOnPaid, taxableOnPaid float64
 		if invoice.IsPartialInvoice {
-			gstOnPaid = invoice.TaxTotal
+			subOnPaid = invoice.SubTotal
+			gstOnPaid = effectiveTaxTotal
 			discountOnPaid = invoice.DiscountTotal
 			adjOnPaid = invoice.Adjustment
+			exciseOnPaid = invoice.ExciseDuty
+			tdsOnPaid = invoice.TDSAmount
+			tcsOnPaid = invoice.TCSAmount
 			taxableOnPaid = invoice.SubTotal - invoice.DiscountTotal
 		} else {
 			ratio := 0.0
 			if actualTotal > 0 {
 				ratio = paidNow / actualTotal
 			}
-			gstOnPaid = actualTax * ratio
-			discountOnPaid = actualDiscount * ratio
-			adjOnPaid = actualAdj * ratio
-			taxableOnPaid = (invoice.SubTotal - invoice.DiscountTotal) * ratio
+			subOnPaid = math.Round((actualSubTotal*ratio)*100) / 100
+			gstOnPaid = math.Round((actualTax*ratio)*100) / 100
+			discountOnPaid = math.Round((actualDiscount*ratio)*100) / 100
+			adjOnPaid = math.Round((actualAdj*ratio)*100) / 100
+			exciseOnPaid = math.Round((actualExcise*ratio)*100) / 100
+			tdsOnPaid = math.Round((invoice.TDSAmount*ratio)*100) / 100
+			tcsOnPaid = math.Round((invoice.TCSAmount*ratio)*100) / 100
+			taxableOnPaid = math.Round(((actualSubTotal-actualDiscount)*ratio)*100) / 100
+		}
+		if taxableOnPaid < 0 {
+			taxableOnPaid = 0
+		}
+		actualTaxable := actualSubTotal - actualDiscount
+		if actualTaxable < 0 {
+			actualTaxable = 0
 		}
 		gstPct := 0.0
-		if taxableOnPaid > 0 {
+		if taxableOnPaid > 0 && gstOnPaid > 0 {
 			gstPct = (gstOnPaid / taxableOnPaid) * 100.0
+		} else if actualTaxable > 0 && actualTax > 0 {
+			gstPct = (actualTax / actualTaxable) * 100.0
 		}
+
+		cgstOnPaid, sgstOnPaid, igstOnPaid := splitGSTAmount(gstOnPaid, isInterState)
+		orderCGST, orderSGST, orderIGST := splitGSTAmount(actualTax, isInterState)
 
 		methodStr := "N/A"
 		txIDStr := "N/A"
@@ -1312,7 +1401,7 @@ func (s *PDFService) GenerateInvoicePDF(
 			}
 		}
 
-		checkPageBreak(68.0)
+		checkPageBreak(92.0)
 		pdf.SetY(pdf.GetY() + 6)
 		pdf.SetFont("Arial", "B", 10)
 		pdf.SetTextColor(primaryR, primaryG, primaryB)
@@ -1334,13 +1423,58 @@ func (s *PDFService) GenerateInvoicePDF(
 			{"Actual Amount (Order Total)", fmt.Sprintf("%s%.2f", currencySymbol, actualTotal)},
 			{"Previous Paid Amount", fmt.Sprintf("%s%.2f", currencySymbol, prevPaid)},
 			{"Paid Amount (Current Payment)", fmt.Sprintf("%s%.2f", currencySymbol, paidNow)},
-			{"GST Calculation for Paid Amount", fmt.Sprintf("+%s%.2f (%.2f%% on Taxable %s%.2f | Order GST: %s%.2f)", currencySymbol, gstOnPaid, gstPct, currencySymbol, taxableOnPaid, currencySymbol, actualTax)},
+			{"Sub Total (Paid Share)", fmt.Sprintf("%s%.2f (Order Sub Total: %s%.2f)", currencySymbol, subOnPaid, currencySymbol, actualSubTotal)},
 			{"Discount (Paid Share)", fmt.Sprintf("-%s%.2f (Order Discount: %s%.2f)", currencySymbol, discountOnPaid, currencySymbol, actualDiscount)},
-			{"Adjustment (Paid Share)", fmt.Sprintf("%s%.2f (Order Adjustment: %s%.2f)", currencySymbol, adjOnPaid, currencySymbol, actualAdj)},
-			{"Method of Payment", methodStr},
-			{"Transaction ID", txIDStr},
-			{"Remaining Order Balance", fmt.Sprintf("%s%.2f", currencySymbol, balanceDue)},
+			{"Taxable Value (Paid Share)", fmt.Sprintf("%s%.2f (Order Taxable: %s%.2f)", currencySymbol, taxableOnPaid, currencySymbol, actualTaxable)},
 		}
+		if showGSTBreakdown {
+			if isInterState {
+				bdRows = append(bdRows, bdRow{
+					fmt.Sprintf("IGST (Paid Share @ %.2f%%)", gstPct),
+					fmt.Sprintf("+%s%.2f (Order IGST: %s%.2f)", currencySymbol, igstOnPaid, currencySymbol, orderIGST),
+				})
+			} else {
+				halfPct := gstPct / 2.0
+				bdRows = append(bdRows,
+					bdRow{
+						fmt.Sprintf("CGST (Paid Share @ %.2f%%)", halfPct),
+						fmt.Sprintf("+%s%.2f (Order CGST: %s%.2f)", currencySymbol, cgstOnPaid, currencySymbol, orderCGST),
+					},
+					bdRow{
+						fmt.Sprintf("SGST (Paid Share @ %.2f%%)", halfPct),
+						fmt.Sprintf("+%s%.2f (Order SGST: %s%.2f)", currencySymbol, sgstOnPaid, currencySymbol, orderSGST),
+					},
+				)
+			}
+		}
+		bdRows = append(bdRows, bdRow{
+			"GST Calculation for Paid Amount",
+			fmt.Sprintf("+%s%.2f (%.2f%% on Taxable %s%.2f | Order GST: %s%.2f)", currencySymbol, gstOnPaid, gstPct, currencySymbol, taxableOnPaid, currencySymbol, actualTax),
+		})
+		if exciseOnPaid > 0 || actualExcise > 0 {
+			bdRows = append(bdRows, bdRow{
+				"Excise Duty (Paid Share)",
+				fmt.Sprintf("+%s%.2f (Order Excise Duty: %s%.2f)", currencySymbol, exciseOnPaid, currencySymbol, actualExcise),
+			})
+		}
+		if tdsOnPaid > 0 || invoice.TDSAmount > 0 {
+			bdRows = append(bdRows, bdRow{
+				"TDS (Paid Share)",
+				fmt.Sprintf("-%s%.2f (Order TDS: %s%.2f)", currencySymbol, tdsOnPaid, currencySymbol, invoice.TDSAmount),
+			})
+		}
+		if tcsOnPaid > 0 || invoice.TCSAmount > 0 {
+			bdRows = append(bdRows, bdRow{
+				"TCS (Paid Share)",
+				fmt.Sprintf("+%s%.2f (Order TCS: %s%.2f)", currencySymbol, tcsOnPaid, currencySymbol, invoice.TCSAmount),
+			})
+		}
+		bdRows = append(bdRows,
+			bdRow{"Adjustment (Paid Share)", fmt.Sprintf("%s%.2f (Order Adjustment: %s%.2f)", currencySymbol, adjOnPaid, currencySymbol, actualAdj)},
+			bdRow{"Method of Payment", methodStr},
+			bdRow{"Transaction ID", txIDStr},
+			bdRow{"Remaining Order Balance", fmt.Sprintf("%s%.2f", currencySymbol, balanceDue)},
+		)
 
 		pdf.SetTextColor(textDarkR, textDarkG, textDarkB)
 		for i, r := range bdRows {
@@ -1492,24 +1626,97 @@ func (s *PDFService) GenerateInvoicePDF(
 		pdf.MultiCell(180, 4, trimmedTerms, "", "L", false)
 	}
 
-	if pdf.GetY() > 245.0 {
-		pdf.AddPage()
+	showSignature := true
+	signatureLabel := "Authorized Signature"
+	signatoryName := strings.TrimSpace(authorName)
+	signatoryTitle := ""
+	signatureImageSrc := ""
+	signatureMandatory := false
+
+	if settings != nil {
+		showSignature = settings.ShowSignature || settings.SignatureMandatory
+		signatureMandatory = settings.SignatureMandatory
+		if strings.TrimSpace(settings.SignatureLabel) != "" {
+			signatureLabel = strings.TrimSpace(settings.SignatureLabel)
+		}
+		if strings.TrimSpace(settings.SignatoryName) != "" {
+			signatoryName = strings.TrimSpace(settings.SignatoryName)
+		}
+		signatoryTitle = strings.TrimSpace(settings.SignatoryTitle)
+		signatureImageSrc = strings.TrimSpace(settings.SignatureImage)
 	}
-	pdf.SetY(-42)
-	trimmedAuthor := strings.TrimSpace(authorName)
-	if trimmedAuthor != "" {
-		pdf.SetX(125)
-		pdf.SetFont("Times", "BI", 13)
+
+	if showSignature {
+		if pdf.GetY() > 232.0 {
+			pdf.AddPage()
+		}
+		sigBlockY := 248.0
+		if pdf.GetY() > 220.0 {
+			sigBlockY = pdf.GetY() + 8.0
+		}
+
+		sigEmbedded := false
+		if signatureImageSrc != "" {
+			if sigTempPath, err := decodeSignatureToTemp(signatureImageSrc); err == nil {
+				defer os.Remove(sigTempPath)
+				imgW, imgH := 42.0, 14.0
+				if f, openErr := os.Open(sigTempPath); openErr == nil {
+					if cfg, _, decErr := image.DecodeConfig(f); decErr == nil && cfg.Width > 0 && cfg.Height > 0 {
+						ratio := float64(cfg.Width) / float64(cfg.Height)
+						imgH = 14.0
+						imgW = imgH * ratio
+						if imgW > 52.0 {
+							imgW = 52.0
+							imgH = imgW / ratio
+						}
+					}
+					f.Close()
+				}
+				imgX := 125.0 + (70.0-imgW)/2.0
+				imgY := sigBlockY - imgH + 10.0
+				pdf.ImageOptions(sigTempPath, imgX, imgY, imgW, imgH, false, gofpdf.ImageOptions{ImageType: "", ReadDpi: true}, 0, "")
+				if pdf.Error() == nil {
+					sigEmbedded = true
+				} else {
+					pdf.ClearError()
+				}
+			}
+		}
+
+		lineY := sigBlockY + 12.0
+		if !sigEmbedded {
+			if signatoryName != "" {
+				pdf.SetXY(125, lineY-7.5)
+				pdf.SetFont("Times", "BI", 13)
+				pdf.SetTextColor(primaryR, primaryG, primaryB)
+				pdf.CellFormat(70, 7, signatoryName, "", 1, "C", false, 0, "")
+			} else if signatureMandatory {
+				pdf.SetXY(125, lineY-6.5)
+				pdf.SetFont("Arial", "I", 8)
+				pdf.SetTextColor(180, 30, 30)
+				pdf.CellFormat(70, 6, "[Signature Required — Configure in Settings]", "", 1, "C", false, 0, "")
+			}
+		}
+
+		pdf.SetXY(125, lineY)
+		pdf.SetFont("Arial", "B", 9)
 		pdf.SetTextColor(primaryR, primaryG, primaryB)
-		pdf.CellFormat(70, 7, trimmedAuthor, "", 1, "C", false, 0, "")
-	} else {
-		pdf.Ln(7)
+		pdf.SetDrawColor(lineR, lineG, lineB)
+		pdf.CellFormat(70, 5, signatureLabel, "T", 1, "C", false, 0, "")
+
+		if sigEmbedded && signatoryName != "" {
+			pdf.SetX(125)
+			pdf.SetFont("Arial", "", 8)
+			pdf.SetTextColor(textDarkR, textDarkG, textDarkB)
+			pdf.CellFormat(70, 4, signatoryName, "", 1, "C", false, 0, "")
+		}
+		if signatoryTitle != "" && !strings.EqualFold(signatoryTitle, signatureLabel) {
+			pdf.SetX(125)
+			pdf.SetFont("Arial", "", 7.5)
+			pdf.SetTextColor(textMutedR, textMutedG, textMutedB)
+			pdf.CellFormat(70, 3.5, signatoryTitle, "", 1, "C", false, 0, "")
+		}
 	}
-	pdf.SetX(125)
-	pdf.SetFont("Arial", "B", 9)
-	pdf.SetTextColor(primaryR, primaryG, primaryB)
-	pdf.SetDrawColor(lineR, lineG, lineB)
-	pdf.CellFormat(70, 5, "Authorized Signature", "T", 1, "C", false, 0, "")
 
 	tempPdfPath := filepath.Join(orgDir, fmt.Sprintf("%s_%d.tmp", invoice.ID.String(), time.Now().UnixNano()))
 	if err := pdf.OutputFileAndClose(tempPdfPath); err != nil {
@@ -1703,6 +1910,94 @@ func downloadLogoToTemp(logoURL string) (string, error) {
 	}
 
 	return tmp.Name(), nil
+}
+
+func resolveInvoiceGSTMode(organization *domain.OrganizationRM, invoice *domain.Invoice, customer *domain.CustomerRM, settings *domain.InvoiceSettings) (bool, bool) {
+	showGST := true
+	mode := "auto"
+	if settings != nil {
+		showGST = settings.ShowGSTBreakdown
+		if strings.TrimSpace(settings.GSTMode) != "" {
+			mode = strings.ToLower(strings.TrimSpace(settings.GSTMode))
+		}
+	}
+
+	switch mode {
+	case "igst":
+		return showGST, true
+	case "cgst_sgst":
+		return showGST, false
+	default:
+		orgState := ""
+		if organization != nil {
+			orgState = strings.TrimSpace(organization.State)
+		}
+		if settings != nil && strings.TrimSpace(settings.CompanyState) != "" && orgState == "" {
+			orgState = strings.TrimSpace(settings.CompanyState)
+		}
+		custState := ""
+		if invoice != nil {
+			custState = strings.TrimSpace(invoice.BillingState)
+			if custState == "" {
+				custState = strings.TrimSpace(invoice.ServiceState)
+			}
+		}
+		if custState == "" && customer != nil {
+			custState = strings.TrimSpace(customer.BillingState)
+		}
+		if orgState != "" && custState != "" && !strings.EqualFold(orgState, custState) {
+			return showGST, true
+		}
+		return showGST, false
+	}
+}
+
+func splitGSTAmount(tax float64, isInterState bool) (cgst, sgst, igst float64) {
+	rounded := math.Round(tax*100) / 100
+	if rounded <= 0 {
+		return 0, 0, 0
+	}
+	if isInterState {
+		return 0, 0, rounded
+	}
+	cgst = math.Round((rounded/2.0)*100) / 100
+	sgst = math.Round((rounded-cgst)*100) / 100
+	return cgst, sgst, 0
+}
+
+func decodeSignatureToTemp(source string) (string, error) {
+	src := strings.TrimSpace(source)
+	if src == "" {
+		return "", fmt.Errorf("empty signature source")
+	}
+	if strings.HasPrefix(src, "data:image/") {
+		idx := strings.Index(src, ",")
+		if idx == -1 || idx >= len(src)-1 {
+			return "", fmt.Errorf("invalid data URI signature")
+		}
+		raw, err := base64.StdEncoding.DecodeString(src[idx+1:])
+		if err != nil {
+			return "", fmt.Errorf("decode signature base64: %w", err)
+		}
+		img, _, err := image.Decode(bytes.NewReader(raw))
+		if err != nil {
+			return "", fmt.Errorf("decode signature image: %w", err)
+		}
+		bounds := img.Bounds()
+		rgba := image.NewRGBA(bounds)
+		draw.Draw(rgba, bounds, img, bounds.Min, draw.Src)
+		tmp, err := os.CreateTemp("", "invoice-sig-*.png")
+		if err != nil {
+			return "", err
+		}
+		defer tmp.Close()
+		if err := png.Encode(tmp, rgba); err != nil {
+			os.Remove(tmp.Name())
+			return "", err
+		}
+		return tmp.Name(), nil
+	}
+	return downloadLogoToTemp(src)
 }
 
 // GenerateSalesOrderPDF generates an official, beautifully styled PDF for a Sales Order
